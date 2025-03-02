@@ -1,0 +1,52 @@
+site_name: jax-mc-pilco
+repo_url: https://github.com/mathDR/jax-mc-pilco
+site_url: https://mathDR.github.io/jax-mc-pilco
+site_description: This is the repository for a jax implementation of Monte Carlo PILCO
+site_author: Daniel Marthaler
+edit_uri: edit/main/docs/
+repo_name: mathDR/jax-mc-pilco
+copyright: Maintained by <a href="https://mathDR.com">mathDR</a>.
+
+nav:
+  - Home: index.md
+  - Modules: modules.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src/jax_mc_pilco"]
+theme:
+  name: material
+  feature:
+    tabs: true
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/mathDR/jax-mc-pilco
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/jax-mc-pilco
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
