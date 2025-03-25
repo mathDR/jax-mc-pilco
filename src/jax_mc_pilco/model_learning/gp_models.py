@@ -1,23 +1,18 @@
 __all__ = ["DynamicalModel"]
 
-from jax import config
-from dataclasses import replace
+from jax import Array, config, grad, jit, vmap
 
 config.update("jax_enable_x64", True)
 
 import gpjax as gpx
 from flax import nnx
-from jax import Array, grad, jit
+
 import jax.numpy as jnp
 import jax.scipy as jsp
 import jax.random as jr
 from jax.typing import ArrayLike
 from typing import List, Optional, Tuple
 import optax as ox
-
-
-def inverse_softplus(x):
-    return jnp.log(jnp.exp(x) - 1.0)
 
 
 class DynamicalModel(nnx.Module):
@@ -32,11 +27,10 @@ class DynamicalModel(nnx.Module):
         data (JAXArray): The input data. This is either state-action pairs
             $(x_t, u_t)$, or (extension) will be observable-action pairs
             $(y_t, u_t).$
-
-
     """
 
-    data: gpx.Dataset
+    states: ArrayLike
+    actions: ArrayLike
     mean_func: Optional[gpx.mean_functions] = None
     name: Optional[str]
     num_outputs: int
@@ -47,16 +41,19 @@ class DynamicalModel(nnx.Module):
 
     def __init__(
         self,
-        data: gpx.Dataset,
+        states: ArrayLike,
+        actions: ArrayLike,
         mean_func: Optional[gpx.mean_functions] = None,
         name: Optional[str] = None,
     ) -> None:
-        self.data = data
+        X, y = self.data_to_gp_input_output(states, actions)
+
+        self.data = gpx.Dataset(X=X, y=y)
         self.mean_func = mean_func
 
-        self.num_outputs: int = data.y.shape[1]
-        self.input_dimension: int = data.X.shape[1]
-        self.num_datapoints: int = data.X.shape[0]
+        self.num_outputs: int = self.data.y.shape[1]
+        self.input_dimension: int = self.data.X.shape[1]
+        self.num_datapoints: int = self.data.X.shape[0]
 
         if mean_func:
             self.mean_func = mean_func
@@ -67,6 +64,55 @@ class DynamicalModel(nnx.Module):
         self.optimizers: List = []
 
         self.name = name
+
+    def data_to_gp_output(self, states: ArrayLike) -> Array:
+        return jnp.diff(states, n=1, axis=0)
+
+    def data_to_gp_input(self, states: ArrayLike, actions: ArrayLike) -> Array:
+        return jnp.hstack((states, actions))
+
+    def data_to_gp_input_output(
+        self, states: ArrayLike, actions: ArrayLike
+    ) -> Tuple[Array, Array]:
+        return self.data_to_gp_input(states, actions)[:-1, :], self.data_to_gp_output(
+            states
+        )
+
+    def create_models(self) -> None:
+        raise NotImplementedError()
+
+    def optimize(self, maxiter: int = 1000, key: Optional[ArrayLike] = None):
+        raise NotImplementedError()
+
+    def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
+        raise NotImplementedError()
+
+    def get_samples(
+        self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
+    ) -> Array:
+        raise NotImplementedError()
+
+
+class MGPR(DynamicalModel):
+    """The forward model of the system dynamics.
+
+    Multiple Gaussian Process regression with an independent GP for every output dimension
+
+    Args:
+        kernel (Kernel): The kernel function
+        data (JAXArray): The input data. This is either state-action pairs
+            $(x_t, u_t)$, or (extension) will be observable-action pairs
+            $(y_t, u_t).$
+    """
+
+    def __init__(
+        self,
+        states: ArrayLike,
+        actions: ArrayLike,
+        mean_func: Optional[gpx.mean_functions] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(states, actions, mean_func, name)
 
     def create_models(self) -> None:
         self.models = []
@@ -109,11 +155,12 @@ class DynamicalModel(nnx.Module):
             self.models[
                 i
             ] = opt_posterior  # Update the model with the optimized posterior.
+            # TODO:
             # Cache K^-1 y and the lower cholesky of K for use in predict
             # self.lower_cholesky_K[i] =
             # self.K_inverse_y[i] =
 
-    def predict_all_outputs(self, test_inputs: Array) -> Tuple[ArrayLike, ArrayLike]:
+    def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
         """
         Return the gp ouputs (mean and variance) for each output dimension for each test input
 
@@ -121,6 +168,9 @@ class DynamicalModel(nnx.Module):
         test_inputs (List[JAXArray]): A list containing the test inputs.
 
         returns a tuple containing the means and covariances of the test inputs.
+
+        Because the GP models the differences in the states, we must add back the state to get
+        the state mean (the variance is the same).
 
         """
         predictive_means = []
@@ -137,6 +187,30 @@ class DynamicalModel(nnx.Module):
             predictive_means.append(predictive_dist.mean())
             predictive_stds.append(predictive_dist.stddev())
         predictive_moments = jnp.stack(
-            (jnp.array(predictive_means).T, jnp.array(predictive_stds).T), axis=2
+            (
+                jnp.array(predictive_means).T + test_inputs[:, : self.num_outputs],
+                jnp.array(predictive_stds).T,
+            ),
+            axis=2,
         )
         return predictive_moments
+
+    def get_samples(
+        self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
+    ) -> Array:
+        # Function to sample from a single mean and covariance
+        def sample_mvnormal(key, mean, cov, num_samples):
+            return jr.multivariate_normal(key, mean, cov, (num_samples,))
+
+        # Vectorize the sampling function
+        vectorized_sample = vmap(sample_mvnormal, in_axes=(None, 0, 0, None))
+        X = self.data_to_gp_input(states, actions)
+        predictive_moments = self.predict_all_outputs(X)
+        return jnp.squeeze(
+            vectorized_sample(
+                key,
+                predictive_moments[:, :, 0],
+                vmap(jnp.diag)(predictive_moments[:, :, 1]),
+                num_samples,
+            )
+        )

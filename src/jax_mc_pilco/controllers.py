@@ -1,20 +1,20 @@
-from flax import nnx
+from __future__ import annotations
+
+from collections.abc import Generator
+from typing import List
+from typing import Optional
+
 import jax.numpy as jnp
 import jax.random as jr
+from flax import nnx
 from jax import Array
 from jax.typing import ArrayLike
-from typing import Generator, List, Optional
 
 
 class Controller(nnx.Module):
     """
     Superclass of controller objects
     """
-
-    state_dim: int
-    input_dim: int
-    to_squash: bool
-    max_action: float
 
     def __init__(
         self,
@@ -34,9 +34,13 @@ class Controller(nnx.Module):
             # assign the identity function
             self.f_squash = lambda x: x
 
-    def compute_action(
-        self, states: ArrayLike, time_for_action: float, key: Optional[ArrayLike]
+    def __call__(
+        self,
+        state: ArrayLike,
+        params: ArrayLike,
+        time_for_action: float,
     ) -> Array:
+        """Generate an action from the controller in state `state` at time `time_for_action`."""
         raise NotImplementedError()
 
     def squashing(self, u: Array) -> ArrayLike:
@@ -63,8 +67,11 @@ class RandomController(Controller):
             max_action,
         )
 
-    def compute_action(
-        self, states: ArrayLike, time_for_action: float, key: Optional[ArrayLike] = None
+    def __call__(
+        self,
+        state: ArrayLike,
+        time_for_action: float,
+        key: ArrayLike | None = None,
     ) -> Array:
         """
         Simple random action
@@ -93,7 +100,7 @@ class Sum_of_Sinusoids(Controller):
     def __init__(
         self,
         state_dim: int,
-        input_dim: int,
+        action_dim: int,
         num_sin: int,
         omega_min: ArrayLike,
         omega_max: ArrayLike,
@@ -103,35 +110,79 @@ class Sum_of_Sinusoids(Controller):
         max_action: float = 1.0,
         key: Optional[ArrayLike] = None,
     ):
-        super(Sum_of_sinusoids, self).__init__()
-        self.state_dim = (state_dim,)
-        self.input_dim = (input_dim,)
-        self.to_squash = (to_squash,)
-        self.max_action = (max_action,)
+        super().__init__(
+            state_dim,
+            action_dim,
+            to_squash,
+            max_action,
+        )
+        # self.state_dim = state_dim
+        # self.action_dim = action_dim
+        # self.max_action = max_action
+
+        # # set squashing function
+        # self.f_squash = lambda x: self.squashing(x)
 
         if key is None:
             key = jr.key(123)
         self.num_sin = num_sin
         # generate random parameters
         key, subkey = jr.split(key)
-        self.amplitudes = jr.uniform(
-            key, shape=(num_sin, input_dim), minval=amplitude_min, maxval=amplitude_max
+        self.amplitudes: nnx.Variable = nnx.Variable(
+            jr.uniform(
+                subkey,
+                shape=(num_sin, action_dim),
+                minval=amplitude_min,
+                maxval=amplitude_max,
+            ),
         )
         key, subkey = jr.split(key)
-        self.omega = jr.uniform(
-            key, shape=(num_sin, input_dim), minval=omega_min, maxval=omega_max
+        self.omega: nnx.Variable = nnx.Variable(
+            jr.uniform(
+                subkey,
+                shape=(
+                    num_sin,
+                    action_dim,
+                ),
+                minval=omega_min,
+                maxval=omega_max,
+            ),
         )
         key, subkey = jr.split(key)
-        self.phases = jr.uniform(
-            key, shape=(num_sin, input_dim), minval=jnp.pi, maxval=jnp.pi
+        self.phases: nnx.Variable = nnx.Variable(
+            jr.uniform(
+                subkey,
+                shape=(num_sin, action_dim),
+                minval=-jnp.pi,
+                maxval=jnp.pi,
+            ),
         )
 
-    def compute_action(
-        self, states: List[ArrayLike], t: ArrayLike
-    ) -> Generator[Array, None, None]:
+    # def reduce_params(self, params: ArrayLike) -> Tuple[Array, Array, Array]:
+    #     """Break params into its respective components"""
+    #     return (
+    #         params[: self.num_sin],
+    #         params[self.num_sin : 2 * self.num_sin],
+    #         params[2 * self.num_sin :],
+    #     )
+
+    def __call__(
+        self,
+        state: ArrayLike,
+        t: ArrayLike,
+    ) -> Array:
         # returns the controller values at times t
-        yield self.f_squash(
-            jnp.sum(
-                self.amplitudes * (jnp.sin(self.omega * t + self.phases)), axis=0
-            ).reshape(-1, self.input_dim)
+        # return self.f_squash(
+        #     jnp.sum(
+        #         self.amplitudes * (jnp.sin(self.omega * t + self.phases)), axis=0
+        #     ).reshape(
+        #         self.action_dim,
+        #     )
+        # )
+        # amplitudes, omega, phases = self.reduce_params(params)
+        return jnp.sum(
+            self.amplitudes * (jnp.sin(self.omega * t + self.phases)),
+            axis=0,
+        ).reshape(
+            self.action_dim,
         )
