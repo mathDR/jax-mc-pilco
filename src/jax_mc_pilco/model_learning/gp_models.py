@@ -1,21 +1,24 @@
+""" The main model class. """
+
 __all__ = ["DynamicalModel"]
 
-from jax import Array, config, grad, jit, vmap
+from typing import Callable, Dict, List, Optional, Tuple
+from jax import Array, config, jit, value_and_grad, vmap
+from jax.tree_util import Partial, tree_map
+from tinygp import kernels, GaussianProcess, transforms
+import tinygp
+import equinox as eqx
+import jax.numpy as jnp
+
+import jax.random as jr
+from jaxtyping import ArrayLike, PyTree
+
+import optax as ox
 
 config.update("jax_enable_x64", True)
 
-import gpjax as gpx
-from flax import nnx
 
-import jax.numpy as jnp
-import jax.scipy as jsp
-import jax.random as jr
-from jax.typing import ArrayLike
-from typing import List, Optional, Tuple
-import optax as ox
-
-
-class DynamicalModel(nnx.Module):
+class DynamicalModel(eqx.Module):
     """The forward model of the system dynamics.
 
     Currently is a Multiple Gaussian Process regression with an independent GP for
@@ -29,67 +32,84 @@ class DynamicalModel(nnx.Module):
             $(y_t, u_t).$
     """
 
-    states: ArrayLike
-    actions: ArrayLike
-    mean_func: Optional[gpx.mean_functions] = None
-    name: Optional[str]
+    # pylint: disable=too-many-instance-attributes
+    mean_func: Optional[Callable] = None
+    training_data: ArrayLike
+    training_outputs: ArrayLike
     num_outputs: int
     input_dimension: int
     num_datapoints: int
-    models: List[gpx.gps.ConjugatePosterior]
     optimizers: List[ox._src.base.GradientTransformationExtraArgs]
+    models: List[ArrayLike]
+    name: Optional[str]
 
     def __init__(
         self,
         states: ArrayLike,
         actions: ArrayLike,
-        mean_func: Optional[gpx.mean_functions] = None,
+        params: Optional[List[Dict[str, float]]] = None,
+        mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
-        X, y = self.data_to_gp_input_output(states, actions)
+        self.training_data, self.training_outputs = self.data_to_gp_input_output(
+            states, actions
+        )
 
-        self.data = gpx.Dataset(X=X, y=y)
-        self.mean_func = mean_func
+        self.num_outputs: int = self.training_outputs.shape[1]
+        self.input_dimension: int = self.training_data.shape[1]
+        self.num_datapoints: int = self.training_data.shape[0]
 
-        self.num_outputs: int = self.data.y.shape[1]
-        self.input_dimension: int = self.data.X.shape[1]
-        self.num_datapoints: int = self.data.X.shape[0]
-
-        if mean_func:
-            self.mean_func = mean_func
+        if mean_func is None:
+            self.mean_func = lambda param, x: 0.0
         else:
-            self.mean_func = [gpx.mean_functions.Zero()] * self.num_outputs
+            self.mean_func = mean_func
 
-        self.create_models()
-        self.optimizers: List = []
+        self.create_models(params)
+        self.optimizers: List[ox._src.base.GradientTransformationExtraArgs] = []
 
         self.name = name
 
     def data_to_gp_output(self, states: ArrayLike) -> Array:
-        return jnp.diff(states, n=1, axis=0)
+        """Transforms data into PILCO data format."""
+        val = jnp.diff(states, n=1, axis=0)
+        if val.ndim == 1:
+            val = jnp.atleast_2d(val).T
+        return val
 
     def data_to_gp_input(self, states: ArrayLike, actions: ArrayLike) -> Array:
-        return jnp.hstack((states, actions))
+        """Transforms data into PILCO data format."""
+        val = jnp.hstack((states, actions))
+        if val.ndim == 1:
+            val = jnp.atleast_2d(val).T
+        return val
 
     def data_to_gp_input_output(
         self, states: ArrayLike, actions: ArrayLike
     ) -> Tuple[Array, Array]:
+        """Transforms data into PILCO data format."""
         return self.data_to_gp_input(states, actions)[:-1, :], self.data_to_gp_output(
             states
         )
 
-    def create_models(self) -> None:
+    def create_models(
+        self,
+        params: Optional[List[Dict[str, float]]] = None,
+    ) -> None:
+        """Create the models for each output dimension."""
         raise NotImplementedError()
 
     def optimize(self, maxiter: int = 1000, key: Optional[ArrayLike] = None):
+        """Minimize negative marginal likelihood for the model over the hyperparameters."""
         raise NotImplementedError()
 
     def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
+        """TODO."""
         raise NotImplementedError()
 
     def get_samples(
         self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
     ) -> Array:
+        """TODO."""
         raise NotImplementedError()
 
 
@@ -109,56 +129,92 @@ class MGPR(DynamicalModel):
         self,
         states: ArrayLike,
         actions: ArrayLike,
-        mean_func: Optional[gpx.mean_functions] = None,
+        params: Optional[List[Dict[str, float]]] = None,
+        mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__(states, actions, mean_func, name)
+        super().__init__(states, actions, params, mean_func, name)
 
-    def create_models(self) -> None:
+    def build_gp(self, param: ArrayLike) -> tinygp.gp.GaussianProcess:
+        """Constructs a zero mean GP from the parameter list."""
+        kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
+            jnp.exp(param["log_scale"]), kernels.ExpSquared()
+        )
+        return GaussianProcess(
+            kernel,
+            self.training_data,
+            diag=jnp.square(jnp.exp(param["log_diag"])),
+            mean=Partial(self.mean_func, param),
+        )
+
+    def create_models(
+        self,
+        params: Optional[List[Dict[str, float]]] = None,
+    ) -> None:
+        """Create GP models using params list"""
+
         self.models = []
-        # self.lower_cholesky_K = []
-        # self.K_inverse_y = []
+
+        if params is None:
+            params = [
+                {
+                    "log_amp": -0.1,
+                    "log_scale": 0.0,
+                    "log_diag": -2.5,
+                }
+            ] * self.num_outputs
 
         for i in range(self.num_outputs):
-            kern = gpx.kernels.RBF(
-                variance=1.0,
-                lengthscale=0.1
-                * jnp.ones((self.input_dimension,)),  # makes an ARD kernel by default
-            )
-            meanf = self.mean_func[i]
-            prior = gpx.gps.Prior(mean_function=meanf, kernel=kern)
-
-            lik = gpx.likelihoods.Gaussian(num_datapoints=self.num_datapoints)
-
-            self.models.append(prior * lik)
+            self.models.append(params[i])
 
     def optimize(self, maxiter: int = 1000, key: Optional[ArrayLike] = None):
+        """Optimize the hyperparameters of the models using MAP nlml."""
+
         if key is None:
             key = jr.key(123)
 
         if not self.optimizers:  # More Pythonic way to check if list is empty
-            for model in self.models:
-                self.optimizers.append(ox.adam(1e-1))
+            for i in range(self.num_outputs):
+                self.optimizers.append(
+                    ox.adam(
+                        learning_rate=ox.linear_schedule(
+                            init_value=1e-1, end_value=1e-6, transition_steps=100
+                        )
+                    )
+                )
 
-        for i, model in enumerate(self.models):  # Iterate with index
-            opt_posterior, history = gpx.fit(
-                model=model,  # Use the current model
-                objective=lambda p, d: -gpx.objectives.conjugate_mll(p, d),
-                train_data=gpx.Dataset(
-                    self.data.X, self.data.y[:, i].reshape(-1, 1)
-                ),  # Use self.data
-                optim=self.optimizers[i],  # Use the correct optimizer
-                num_iters=maxiter,
-                safe=True,
-                key=key,
-            )
-            self.models[
-                i
-            ] = opt_posterior  # Update the model with the optimized posterior.
-            # TODO:
-            # Cache K^-1 y and the lower cholesky of K for use in predict
-            # self.lower_cholesky_K[i] =
-            # self.K_inverse_y[i] =
+        patience = 3
+        for i in range(self.num_outputs):  # Iterate with index
+
+            @jit
+            def loss(params):
+                gp = self.build_gp(params)
+                return -gp.log_probability(self.training_outputs[:, i])
+
+            @jit
+            def make_step(
+                params: ArrayLike,
+                opt_state: PyTree,
+            ):
+                loss_value, grads = value_and_grad(loss)(params)
+                updates, opt_state = self.optimizers[i].update(grads, opt_state, params)
+                params = ox.apply_updates(params, updates)
+                return params, opt_state, loss_value
+
+            patience_count = 0
+            params = tree_map(jnp.asarray, self.models[i])
+            opt_state = self.optimizers[i].init(params)
+            best_val = float("inf")
+            for _ in range(maxiter):
+                params, opt_state, train_loss = make_step(params, opt_state)
+                if train_loss < best_val:
+                    best_val = train_loss
+                    patience_count = 0
+                else:
+                    patience_count += 1
+                if patience_count > patience:
+                    break
+            self.models[i] = params  # Update the model with the optimized posterior.
 
     def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
         """
@@ -174,22 +230,16 @@ class MGPR(DynamicalModel):
 
         """
         predictive_means = []
-        predictive_stds = []
+        predictive_vars = []
         for i in range(self.num_outputs):
-            latent_dist = self.models[i].predict(
-                test_inputs,
-                train_data=gpx.Dataset(
-                    X=self.data.X, y=self.data.y[:, i].reshape(-1, 1)
-                ),
-            )
-            predictive_dist = self.models[i].likelihood(latent_dist)
-
-            predictive_means.append(predictive_dist.mean())
-            predictive_stds.append(predictive_dist.stddev())
+            gp = self.build_gp(self.models[i])
+            cond_gp = gp.condition(self.training_outputs[:, i], test_inputs).gp
+            predictive_means.append(cond_gp.loc)
+            predictive_vars.append(cond_gp.variance)
         predictive_moments = jnp.stack(
             (
                 jnp.array(predictive_means).T + test_inputs[:, : self.num_outputs],
-                jnp.array(predictive_stds).T,
+                jnp.array(predictive_vars).T,
             ),
             axis=2,
         )
@@ -204,8 +254,8 @@ class MGPR(DynamicalModel):
 
         # Vectorize the sampling function
         vectorized_sample = vmap(sample_mvnormal, in_axes=(None, 0, 0, None))
-        X = self.data_to_gp_input(states, actions)
-        predictive_moments = self.predict_all_outputs(X)
+        test_inputs = self.data_to_gp_input(states, actions)
+        predictive_moments = self.predict_all_outputs(test_inputs)
         return jnp.squeeze(
             vectorized_sample(
                 key,

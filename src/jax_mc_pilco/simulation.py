@@ -1,79 +1,24 @@
-from __future__ import annotations
-
-import typing as tp
-
-import gpjax as gpx
-import gymnasium as gym
 import jax
+import equinox as eqx
+from jax import Array, config
 import jax.numpy as jnp
-import jax.random as jr
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-import numpy as np
-import optax as ox
-from controllers import RandomController
-from controllers import Sum_of_Sinusoids
-from flax import nnx
-from gpjax.typing import Array
-from gpjax.typing import KeyArray
-from gpjax.typing import ScalarFloat
-from jax import Array
-from jax import config
 from jax.tree_util import Partial
-from jaxtyping import ArrayLike
-from jaxtyping import install_import_hook
-from model_learning.mgpr import DynamicalModel
+import numpy as np
+import jax.random as jr
+from jaxtyping import ArrayLike, install_import_hook, Array, Float, Int, PyTree
 
-Model = tp.TypeVar('Model', bound=nnx.Module)
+config.update("jax_enable_x64", True)
 
-config.update('jax_enable_x64', True)
+key = jr.key(123)
 
-
-# Function to sample from a single mean and covariance
-def sample_mvnormal(key, mean, cov, num_samples):
-    return jr.multivariate_normal(key, mean, cov, (num_samples,))
-
-
-def one_rollout_step(carry, t):
-    policy, predict_all_outputs, key, samples, total_cost = carry
-    key, *subkeys = jr.split(key, num_particles + 1)
-    u = jax.vmap(policy)(
-        samples, jnp.tile(
-            t, num_particles,
-        ), jnp.array(subkeys),
-    )
-    this_state = jnp.hstack((samples, u))
-    predictive_moments = predict_all_outputs(this_state)
-    key, subkey = jr.split(key)
-    samples = jnp.squeeze(
-        vectorized_sample(
-            key,
-            predictive_moments[:, :, 0],
-            jax.vmap(jnp.diag)(predictive_moments[:, :, 1]),
-            1,
-        ),
-    )
-    cost = jnp.sum(jax.vmap(cart_pole_cost)(samples))
-    return (policy, predict_all_outputs, key, samples, total_cost + cost), cost
+import gymnasium as gym
+from controllers import RandomController, LinearPolicy
+from model_learning.gp_models import MGPR
 
 
-def rollout(
-    policy,  #: Controller,
-    init_samples: ArrayLike,
-    model,  # Model
-    timesteps: ArrayLike,
-    key: KeyArray = jr.PRNGKey(42),
-) -> ScalarFloat:
-    action = Partial(policy)
-    pao = Partial(model.predict_all_outputs)
-    (action, pao, key, samples, total_cost), result = jax.lax.scan(
-        one_rollout_step, (action, pao, key, init_samples, 0), timesteps,
-    )
-    return total_cost / len(timesteps)
+import optax as ox
 
-
-# Vectorize the sampling function
-vectorized_sample = jax.vmap(sample_mvnormal, in_axes=(None, 0, 0, None))
+from typing import Tuple
 
 
 def cart_pole_cost(
@@ -94,84 +39,162 @@ def cart_pole_cost(
 
     return 1 - jnp.exp(
         -(jnp.square((jnp.abs(theta) - target_theta) / lengthscales[0]))
-        - jnp.square((x - target_x) / lengthscales[1]),
+        - jnp.square((x - target_x) / lengthscales[1])
     )
 
 
-env = gym.make('InvertedPendulum-v5')
+@eqx.filter_jit
+@eqx.debug.assert_max_traces(max_traces=1)
+def rollout(
+    policy: eqx.Module,
+    init_samples: ArrayLike,
+    model: eqx.Module,
+    timesteps: ArrayLike,
+    key: ArrayLike = jr.key(123),
+) -> float:
+    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
+
+    def one_rollout_step(carry, t):
+        policy_params, key, samples, total_cost = carry
+        policy = eqx.combine(policy_params, policy_static)
+        actions = jax.vmap(policy)(samples, jnp.tile(t, num_particles))
+
+        key, subkey = jr.split(key)
+        samples = model.get_samples(key, samples, actions, 1)
+        cost = jnp.sum(jax.vmap(cart_pole_cost)(jnp.hstack((samples, actions))))
+        return (policy_params, key, samples, total_cost + cost), cost
+
+    total_cost = 0
+    (policy_params, key, samples, total_cost), result = jax.lax.scan(
+        one_rollout_step, (policy_params, key, init_samples, total_cost), timesteps
+    )
+    return total_cost / len(timesteps)
+
+
+def fit_controller(  # noqa: PLR0913
+    *,
+    policy: eqx.Module,
+    samples: ArrayLike,
+    timesteps: ArrayLike,
+    gp_model: eqx.Module,
+    optim: ox.GradientTransformation,
+    key: ArrayLike = jr.PRNGKey(42),
+    num_iters: int = 100,
+    unroll: int = 5,
+) -> Tuple[eqx.Module, Array]:
+    opt_state = optim.init(eqx.filter(policy, eqx.is_array))
+
+    # Mini-batch random keys to scan over.
+    iter_keys = jr.split(key, num_iters)
+
+    # Optimisation step.
+    @eqx.filter_jit
+    def make_step(
+        policy: eqx.Module,
+        opt_state: PyTree,
+    ) -> Tuple[eqx.Module, PyTree, float]:
+        loss_value, loss_gradient = eqx.filter_value_and_grad(rollout)(
+            policy, samples, gp_model, timesteps
+        )
+        updates, opt_state = optim.update(
+            loss_gradient, opt_state, eqx.filter(policy, eqx.is_array)
+        )
+        policy = eqx.apply_updates(policy, updates)
+        return policy, opt_state, loss_value
+
+    # Optimisation loop.
+    for step in range(num_iters):
+        policy, opt_state, train_loss = make_step(policy, opt_state)
+        if (step % 100) == 0 or (step == num_iters - 1):
+            print(f"{step=}, train_loss={train_loss.item()}, ")
+
+    return policy
+
+
+num_particles = 400
+num_trials = 5
+T_sampling = 0.05
+T_exploration = 3.0
+T_control = 3.0
+sim_timestep = 0.1
+
+env = gym.make("InvertedPendulum-v5")
+env_test = gym.make("InvertedPendulum-v5", render_mode="rgb_array")
 
 action_dim = env.action_space.shape[0]
-initial_state_exploration, _ = env.reset()
-state_dim = initial_state_exploration.shape[0]
+x, _ = env.reset()
+state_dim = x.shape[0]
+num_basis = 200
+umax = 3.0
+policy = LinearPolicy(state_dim, action_dim, True, umax)
 
 # Initialize a random controller
-
 exploration_policy = RandomController(state_dim, action_dim, True, 3.0)
 
-initial_explore_timesteps = 10
 
-X = []
-Y = []
-ep_return_full = 0
-ep_return_sampled = 0
+# Randomly sample some points
 key = jr.key(42)
-x = initial_state_exploration.copy()
-for timestep in range(initial_explore_timesteps):
-    key, subkey = jr.split(key)
-    u = exploration_policy(x, timestep, subkey)
-    # print(u)
-    z = env.step(np.array(u))
-    # print(z)
-    # x_new, r, done, _, __ = env.step(np.array(u))
-    x_new = z[0]
-    r = z[1]
-    X.append(jnp.hstack((x, u)))
-    Y.append(x_new - x)
-    ep_return_sampled += r
-    x = x_new
-X = jnp.array(X)
-Y = jnp.array(Y)
-D = gpx.Dataset(X=X, y=Y)
+x, _ = env.reset()
+states = [x]
+key, subkey = jr.split(key)
+# u = env.action_space.sample()
+u = exploration_policy(x, 0, subkey)
+actions = [u]
 
-model = DynamicalModel(data=D)
+for timestep in np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1):
+    z = env.step(np.array(u))
+    x = z[0]
+    states.append(x)
+    key, subkey = jr.split(key)
+    # u = env.action_space.sample()
+    u = exploration_policy(x, timestep, subkey)
+    actions.append(u)
+
+model = MGPR(states=jnp.array(states), actions=jnp.array(actions))
 model.optimize()
 
-# Generate an initial state
-x0, _ = env.reset()
+# Do a rollout
+x, _ = env.reset()
 key, subkey = jr.split(key)
 # Generate an initial action
-u0 = exploration_policy(x, timestep, subkey)
-initial_state = jnp.hstack((x, u)).reshape(1, -1)
-# Compute the moments from the trained GP transition function
-predictive_moments = model.predict_all_outputs(initial_state)
+u = exploration_policy(x, timestep, subkey)
 
-num_particles = 100
-init_samples = jnp.squeeze(
-    vectorized_sample(
-        key,
-        predictive_moments[:, :, 0],
-        jax.vmap(jnp.diag)(predictive_moments[:, :, 1]),
-        num_particles,
-    ),
+# initialize some particles
+initial_particles = model.get_samples(
+    key, jnp.array([x]), jnp.array([u]), num_particles
 )
 
-time_horizon = 50
-timesteps = jnp.arange(timestep + 1, timestep + time_horizon)
-
-policy = Sum_of_Sinusoids(
-    state_dim, action_dim, 6, 0.0, 2.0 * np.pi, -1.0, 1.0, True, 3.0,
+control_horizon = int(T_control / T_sampling)
+optimizer = ox.adam(
+    learning_rate=ox.linear_schedule(
+        init_value=1e-2, end_value=1e-6, transition_steps=100
+    )
 )
-objective_fun = Partial(rollout, model=model, timesteps=timesteps)
-
-optimizer = ox.adam(learning_rate=1e-2)
-print(policy.amplitudes, policy.omega, policy.phases)
-breakpoint()
-policy, history = gpx.fit(
-    model=policy,
-    objective=objective_fun,
-    train_data=init_samples,
+policy = fit_controller(
+    policy=policy,
+    samples=initial_particles,
+    timesteps=jnp.arange(control_horizon),
+    gp_model=model,
     optim=optimizer,
-    params_bijection=None,
-    safe=False,
+    num_iters=1000,
 )
-print(policy.amplitudes, policy.omega, policy.phases)
+
+# Now try this policy on the real system
+x, _ = env_test.reset()
+key, subkey = jr.split(key)
+u = policy(x, timestep, subkey)
+# Randomly sample some points
+states.append(x)
+actions.append(u)
+img = plt.imshow(env_test.render())  # only call this once
+for timestep in np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1):
+    z = env_test.step(np.array(u))
+    x = z[0]
+    r = z[1]
+    key, subkey = jr.split(key)
+    u = policy(x, timestep, subkey)
+    states.append(x)
+    actions.append(u)
+    img.set_data(env_test.render())  # just update the data
+    display.display(plt.gcf())
+    display.clear_output(wait=True)
