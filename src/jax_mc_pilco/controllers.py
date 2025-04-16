@@ -159,64 +159,29 @@ class LinearPolicy(Controller):
         )
 
 
-def set_sos_params(
-    action_dim: int,
-    num_sin: int,
-    omega_min: ArrayLike,
-    omega_max: ArrayLike,
-    amplitude_min: ArrayLike,
-    amplitude_max: ArrayLike,
-    key: Optional[ArrayLike] = None,
-) -> Array:
-    if key is None:
-        key = jr.key(123)
-
-    # generate random parameters
-    key, subkey = jr.split(key)
-    amplitudes: ArrayLike = jr.uniform(
-        subkey,
-        shape=(num_sin, action_dim),
-        minval=amplitude_min,
-        maxval=amplitude_max,
-    )
-
-    key, subkey = jr.split(key)
-    omega: ArrayLike = jr.uniform(
-        subkey,
-        shape=(
-            num_sin,
-            action_dim,
-        ),
-        minval=omega_min,
-        maxval=omega_max,
-    )
-
-    key, subkey = jr.split(key)
-    phases: ArrayLike = jr.uniform(
-        subkey,
-        shape=(num_sin, action_dim),
-        minval=-jnp.pi,
-        maxval=jnp.pi,
-    )
-
-    return jnp.vstack((amplitudes, omega, phases))
-
-
 class Sum_of_Sinusoids(Controller):
     """
     Exploration policy: sum of 'num_sin' sinusoids with random amplitudes and frequencies
     """
 
     num_sin: int
+    amplitudes: ArrayLike
+    omega: ArrayLike
+    phases: ArrayLike
 
     def __init__(
         self,
         state_dim: int,
         action_dim: int,
         num_sin: int,
+        omega_min: ArrayLike,
+        omega_max: ArrayLike,
+        amplitude_min: ArrayLike,
+        amplitude_max: ArrayLike,
         to_squash: bool = False,
         max_action: float = 1.0,
-    ) -> Tuple[Array, Array, Array]:
+        key: Optional[ArrayLike] = None,
+    ):
         super().__init__(
             state_dim,
             action_dim,
@@ -226,24 +191,46 @@ class Sum_of_Sinusoids(Controller):
 
         self.num_sin = num_sin
 
-    def reduce_params(self, params: ArrayLike) -> Tuple[Array, Array, Array]:
-        """Break params into its respective components"""
-        return (
-            params[: self.num_sin],
-            params[self.num_sin : 2 * self.num_sin],
-            params[2 * self.num_sin :],
+        if key is None:
+            key = jr.key(123)
+
+        # generate random parameters
+        key, subkey = jr.split(key)
+        self.amplitudes: ArrayLike = jr.uniform(
+            subkey,
+            shape=(num_sin, action_dim),
+            minval=amplitude_min,
+            maxval=amplitude_max,
+        )
+
+        key, subkey = jr.split(key)
+        self.omega: ArrayLike = jr.uniform(
+            subkey,
+            shape=(
+                num_sin,
+                action_dim,
+            ),
+            minval=omega_min,
+            maxval=omega_max,
+        )
+
+        key, subkey = jr.split(key)
+
+        self.phases: ArrayLike = jr.uniform(
+            subkey,
+            shape=(num_sin, action_dim),
+            minval=-jnp.pi,
+            maxval=jnp.pi,
         )
 
     def __call__(
         self,
-        params: ArrayLike,
         state: ArrayLike,
         t: ArrayLike,
     ) -> Array:
-        amplitudes, omega, phases = self.reduce_params(params)
         return self.f_squash(
             jnp.sum(
-                amplitudes * (jnp.sin(omega * t + phases)),
+                self.amplitudes * (jnp.sin(self.omega * t + self.phases)),
                 axis=0,
             ).reshape(
                 self.action_dim,

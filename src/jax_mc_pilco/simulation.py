@@ -102,9 +102,21 @@ def fit_controller(  # noqa: PLR0913
         policy = eqx.apply_updates(policy, updates)
         return policy, opt_state, loss_value
 
-    # Optimisation loop.
+    # Optimisation loop - hack an early stopping criteron
+    best_loss: float = float("inf")
+    patience: int = 2  # Number of steps of no improvement before stopping
+    patience_count: int = 0  # Number of steps since last improving update.
+    min_delta: float = (
+        1e-3  # Minimum delta between updates to be considered an improvement
+    )
     for step in range(num_iters):
         policy, opt_state, train_loss = make_step(policy, opt_state)
+        patience_count = jax.lax.cond(
+            best_loss - train_loss > min_delta, 0, patience_count + 1
+        )
+        best_loss = jax.lax.cond(train_loss < best_loss, train_loss, best_loss)
+        if patience_count > patience:
+            break
         if (step % 100) == 0 or (step == num_iters - 1):
             print(f"{step=}, train_loss={train_loss.item()}, ")
 
