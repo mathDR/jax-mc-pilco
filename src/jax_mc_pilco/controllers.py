@@ -27,7 +27,7 @@ class Controller(eqx.Module):
         state_dim: int,
         action_dim: int,
         to_squash: bool = False,
-        max_action: float = 1.0,
+        max_action: Float = 1.0,
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -137,10 +137,6 @@ class LinearPolicy(Controller):
             subkey, shape=(1, action_dim)
         )  # offset/bias vector (1, D )
 
-    def reduce_params(self, params: ArrayLike) -> Tuple[Array, Array]:
-        """Break params into its respective components"""
-        return (params[:, :-1], params[:, -1])
-
     def __call__(
         self,
         state_mean: ArrayLike,
@@ -227,11 +223,11 @@ class SumOfSinusoids(Controller):
     def __call__(
         self,
         state: ArrayLike,
-        t: ArrayLike,
+        timestep: ArrayLike,
     ) -> Array:
         return self.f_squash(
             jnp.sum(
-                self.amplitudes * (jnp.sin(self.omega * t + self.phases)),
+                self.amplitudes * (jnp.sin(self.omega * timestep + self.phases)),
                 axis=0,
             ).reshape(
                 self.action_dim,
@@ -265,7 +261,7 @@ class SumOfGaussians(Controller):
         use_dropout: bool = True,
         dropout_probability: Float = 0.5,
         to_squash: bool = False,
-        max_action: float = 1.0,
+        max_action: Float = 1.0,
         key: Optional[ArrayLike] = None,
     ):
         super().__init__(
@@ -309,7 +305,7 @@ class SumOfGaussians(Controller):
         if use_dropout:
             self.f_drop = eqx.nn.Dropout(p=dropout_probability)
         else:
-            self.f_drop = eqx.nn.Identity
+            self.f_drop = eqx.nn.Lambda(lambda x: x)
 
     def __call__(
         self,
@@ -349,96 +345,73 @@ class SumOfGaussians(Controller):
         return self.f_squash(inputs)
 
 
-class SumOfGaussiansWithAngles(SumOfGaussians):
-    """
-    Extends sum of gaussians policy. Angle indices are mapped in cos and sin before computing
-    the policy
-    """
+# class SumOfGaussiansWithAngles(SumOfGaussians):
+#     """
+#     Extends sum of gaussians policy. Angle indices are mapped in cos and sin before computing
+#     the policy
+#     """
 
-    angle_indices: ArrayLike
-    non_angle_indices: ArrayLike
-    num_angle_indices: Int
-    num_non_angle_indices: Int
+#     angle_indices: ArrayLike
+#     non_angle_indices: ArrayLike
+#     num_angle_indices: Int
+#     num_non_angle_indices: Int
 
-    def __init__(
-        self,
-        state_dim: int,
-        action_dim: int,
-        num_basis: int,
-        angle_indices: ArrayLike,
-        non_angle_indices: ArrayLike,
-        initial_log_lengthscales: Optional[ArrayLike] = None,
-        initial_centers: Optional[ArrayLike] = None,
-        centers_init_min: Float = -1.0,
-        centers_init_max: Float = 1.0,
-        use_bias: bool = True,
-        scale_factor: Optional[ArrayLike] = None,
-        use_dropout: bool = True,
-        dropout_probability: Float = 0.5,
-        to_squash: bool = False,
-        max_action: float = 1.0,
-        key: Optional[ArrayLike] = None,
-    ):
-        self.angle_indices = angle_indices
-        self.non_angle_indices = non_angle_indices
-        self.num_angle_indices = angle_indices.size
-        self.num_non_angle_indices = non_angle_indices.size
-        super().__init__(
-            state_dim + self.num_angle_indices,
-            action_dim,
-            num_basis,
-            initial_log_lengthscales,
-            initial_centers,
-            centers_init_min,
-            centers_init_max,
-            use_bias,
-            scale_factor,
-            use_dropout,
-            dropout_probability,
-            to_squash,
-            max_action,
-            key,
-        )
+#     def __init__(
+#         self,
+#         state_dim: int,
+#         action_dim: int,
+#         num_basis: int,
+#         angle_indices: ArrayLike,
+#         non_angle_indices: ArrayLike,
+#         initial_log_lengthscales: Optional[ArrayLike] = None,
+#         initial_centers: Optional[ArrayLike] = None,
+#         centers_init_min: Float = -1.0,
+#         centers_init_max: Float = 1.0,
+#         use_bias: bool = True,
+#         scale_factor: Optional[ArrayLike] = None,
+#         use_dropout: bool = True,
+#         dropout_probability: Float = 0.5,
+#         to_squash: bool = False,
+#         max_action: Float = 1.0,
+#         key: Optional[ArrayLike] = None,
+#     ):
+#         self.angle_indices = angle_indices
+#         self.non_angle_indices = non_angle_indices
+#         self.num_angle_indices = angle_indices.size
+#         self.num_non_angle_indices = non_angle_indices.size
 
-    def __call__(
-        self,
-        states: ArrayLike,
-        timestep: Optional[Float] = None,
-        key: Optional[ArrayLike] = None,
-    ):
-        # build a state with non angle features and cos,sin of angle features
-        # states = states.reshape([-1, self.state_dim - self.num_angle_indices])
-        # new_state = jnp.concatenate(
-        #     [
-        #         states[:, self.non_angle_indices],
-        #         jnp.cos(states[:, self.angle_indices]),
-        #         jnp.sin(states[:, self.angle_indices]),
-        #     ],
-        #     axis=1,
-        # )
-        # call the superclass -- idk how to do this in jax so that it is traceable
-        if key is None:
-            key = jr.key(123)
-        # get the lengthscales from log
-        lengthscales = jnp.exp(self.log_lengthscales)
+#         super(SumOfGaussiansWithAngles, self).__init__(
+#             state_dim + self.num_angle_indices,
+#             action_dim,
+#             num_basis,
+#             initial_log_lengthscales,
+#             initial_centers,
+#             centers_init_min,
+#             centers_init_max,
+#             use_bias,
+#             scale_factor,
+#             use_dropout,
+#             dropout_probability,
+#             to_squash,
+#             max_action,
+#             key,
+#         )
 
-        states = states.reshape([-1, self.state_dim])
-        # normalize states and centers
-        norm_states = states / lengthscales
-        norm_centers = self.centers / lengthscales
-        # get the square distances
-        distances = jnp.squeeze(
-            jnp.linalg.norm(norm_states[:, None, :] - norm_centers[None, :, :], axis=2)
-        )
-        rbf_activations = jnp.exp(-0.5 * jnp.square(distances))
-        # apply exp and get output
-        key, subkey = jr.split(key)
-        exp_dist_dropped = self.f_drop(rbf_activations, key=subkey)
-        inputs = self.f_linear(exp_dist_dropped).reshape(
-            [
-                self.action_dim,
-            ]
-        )
-
-        # returns the constrained control action
-        return self.f_squash(inputs)
+#     def __call__(
+#         self,
+#         states: ArrayLike,
+#         timestep: Optional[Float] = None,
+#         key: Optional[ArrayLike] = None,
+#     ):
+#         # build a state with non angle features and cos,sin of angle features
+#         states = jnp.squeeze(states)
+#         #     states.reshape([-1, self.state_dim - self.num_angle_indices])
+#         # )
+#         new_states = jnp.concatenate(
+#             [
+#                 jnp.take(states, self.non_angle_indices),
+#                 jnp.cos(jnp.take(states, self.angle_indices)),
+#                 jnp.sin(jnp.take(states, self.angle_indices)),
+#             ]
+#         ).reshape([-1, self.state_dim])
+#         return super(SumOfGaussiansWithAngles, self).__call__(new_states, timestep, key)
