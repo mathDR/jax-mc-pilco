@@ -315,7 +315,7 @@ class SumOfGaussians(Controller):
     ):
         """
         Returns a linear combination of gaussian functions
-        with input given by the the distances between that state
+        with input given by the distances between that state
         and the vector of centers of the gaussian functions
         """
         if key is None:
@@ -343,75 +343,3 @@ class SumOfGaussians(Controller):
 
         # returns the constrained control action
         return self.f_squash(inputs)
-
-
-# class SumOfGaussiansWithAngles(SumOfGaussians):
-#     """
-#     Extends sum of gaussians policy. Angle indices are mapped in cos and sin before computing
-#     the policy
-#     """
-
-#     angle_indices: ArrayLike
-#     non_angle_indices: ArrayLike
-#     num_angle_indices: Int
-#     num_non_angle_indices: Int
-
-#     def __init__(
-#         self,
-#         state_dim: int,
-#         action_dim: int,
-#         num_basis: int,
-#         angle_indices: ArrayLike,
-#         non_angle_indices: ArrayLike,
-#         initial_log_lengthscales: Optional[ArrayLike] = None,
-#         initial_centers: Optional[ArrayLike] = None,
-#         centers_init_min: Float = -1.0,
-#         centers_init_max: Float = 1.0,
-#         use_bias: bool = True,
-#         scale_factor: Optional[ArrayLike] = None,
-#         use_dropout: bool = True,
-#         dropout_probability: Float = 0.5,
-#         to_squash: bool = False,
-#         max_action: Float = 1.0,
-#         key: Optional[ArrayLike] = None,
-#     ):
-#         self.angle_indices = angle_indices
-#         self.non_angle_indices = non_angle_indices
-#         self.num_angle_indices = angle_indices.size
-#         self.num_non_angle_indices = non_angle_indices.size
-
-#         super(SumOfGaussiansWithAngles, self).__init__(
-#             state_dim + self.num_angle_indices,
-#             action_dim,
-#             num_basis,
-#             initial_log_lengthscales,
-#             initial_centers,
-#             centers_init_min,
-#             centers_init_max,
-#             use_bias,
-#             scale_factor,
-#             use_dropout,
-#             dropout_probability,
-#             to_squash,
-#             max_action,
-#             key,
-#         )
-
-#     def __call__(
-#         self,
-#         states: ArrayLike,
-#         timestep: Optional[Float] = None,
-#         key: Optional[ArrayLike] = None,
-#     ):
-#         # build a state with non angle features and cos,sin of angle features
-#         states = jnp.squeeze(states)
-#         #     states.reshape([-1, self.state_dim - self.num_angle_indices])
-#         # )
-#         new_states = jnp.concatenate(
-#             [
-#                 jnp.take(states, self.non_angle_indices),
-#                 jnp.cos(jnp.take(states, self.angle_indices)),
-#                 jnp.sin(jnp.take(states, self.angle_indices)),
-#             ]
-#         ).reshape([-1, self.state_dim])
-#         return super(SumOfGaussiansWithAngles, self).__call__(new_states, timestep, key)
