@@ -49,11 +49,11 @@ class Controller(eqx.Module):
         """Generate an action from the controller in state `state` at time `time_for_action`."""
         raise NotImplementedError()
 
-    def squashing(self, u: ArrayLike) -> Array:
+    def squashing(self, action: ArrayLike) -> Array:
         """
         Squash the inputs inside (-max_action, +max_action)
         """
-        return self.max_action * jnp.tanh(u / self.max_action)
+        return self.max_action * jnp.tanh(action / self.max_action)
 
 
 class RandomController(Controller):
