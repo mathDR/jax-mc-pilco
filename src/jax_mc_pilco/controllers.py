@@ -277,21 +277,23 @@ class SumOfGaussians(Controller):
         self.num_basis = num_basis
         # get initial log lengthscales
         if initial_log_lengthscales is None:
-            initial_log_lengthscales = jnp.ones(state_dim)
+            initial_log_lengthscales = jnp.ones(self.state_dim)
         self.log_lengthscales = jnp.log(initial_log_lengthscales).reshape([1, -1])
 
         # get initial centers
         if initial_centers is None:
             key, subkey = jr.split(key)
-            initial_centers = centers_init_min * jnp.ones([num_basis, state_dim]) + (
-                centers_init_max - centers_init_min
-            ) * jr.uniform(subkey, shape=(num_basis, state_dim))
+            initial_centers = centers_init_min * jnp.ones(
+                [self.num_basis, self.state_dim]
+            ) + (centers_init_max - centers_init_min) * jr.uniform(
+                subkey, shape=(self.num_basis, self.state_dim)
+            )
         self.centers = initial_centers
         # initilize the linear ouput layer
         key, subkey = jr.split(key)
         self.f_linear = eqx.nn.Linear(
-            in_features=num_basis,
-            out_features=action_dim,
+            in_features=self.num_basis,
+            out_features=self.action_dim,
             use_bias=use_bias,
             key=subkey,
         )
@@ -323,8 +325,10 @@ class SumOfGaussians(Controller):
         # get the lengthscales from log
         lengthscales = jnp.exp(self.log_lengthscales)
 
+        # Need to "inflate" the state to make the angle into trig functioned version
         states = states.reshape([-1, self.state_dim])
-        # normalize states and centers
+
+        # normalize new_states and centers
         norm_states = states / lengthscales
         norm_centers = self.centers / lengthscales
         # get the square distances

@@ -6,12 +6,14 @@ from jaxtyping import Array, ArrayLike, Int
 from ..controllers import Controller
 import jax.random as jr
 from jax import config
+from typing import Tuple
 
 config.update("jax_enable_x64", True)
 
 
 def remake_state(x):
-    return np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
+    return x
+    # return np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
 
 
 def sample_from_environment(
@@ -44,8 +46,7 @@ def sample_from_environment(
         state = remake_state(x)
         states.append(state)
         key, subkey = jr.split(key)
-        policy(state, 0.0)
-        # u = exploration_policy(x,0,subkey)
+        u = policy(state, 0.0)
         actions.append(u)
 
         for timestep in timesteps:
@@ -54,7 +55,7 @@ def sample_from_environment(
             state = remake_state(x)
             states.append(state)
             key, subkey = jr.split(key)
-            policy(state, timestep)
+            u = policy(state, timestep)
             actions.append(u)
 
     return states, actions

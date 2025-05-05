@@ -56,16 +56,12 @@ control_policy = SumOfGaussians(
     to_squash=True,
     max_action=umax,
 )
-# optimizer = ox.inject_hyperparams(ox.adam)(learning_rate=1e-2)
+
 states, actions = sample_from_environment(
     env, timesteps, num_trials, random_policy, key
 )
 for outer_loop_iteration in range(5):
-    optimizer = ox.adam(
-        learning_rate=ox.linear_schedule(
-            init_value=1e-2, end_value=1e-6, transition_steps=100
-        )
-    )
+    optimizer = ox.inject_hyperparams(ox.adam)(learning_rate=1e-2)
     model = MGPR(states=jnp.array(states), actions=jnp.array(actions))
     model.optimize()
     control_policy, losses = fit_controller(

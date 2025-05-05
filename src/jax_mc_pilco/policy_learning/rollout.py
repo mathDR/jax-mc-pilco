@@ -11,16 +11,13 @@ import jax.random as jr
 import gymnasium
 
 
-def remake_state(x):
-    return np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
-
-
 def fit_controller(  # noqa: PLR0913
     *,
     policy: eqx.Module,
     starting_dropout_probability: Float,
     env: gymnasium.wrappers.common.TimeLimit,
     num_particles: Int,
+    initial_state: ArrayLike,
     timesteps: ArrayLike,
     gp_model: eqx.Module,
     obj_func: Callable,
@@ -31,12 +28,14 @@ def fit_controller(  # noqa: PLR0913
 ) -> Tuple[eqx.Module, Array]:
     """The optimization loop for fitting the policy parameters."""
     # Now do a rollout with this model
-    # Generate an initial state
-    x, _ = env.reset()
-    sample = remake_state(x)
+    # Generate an initial state uniformly with damping around the final state
+    sample, _ = env.reset(
+        options={"x_init": initial_state[0], "y_init": initial_state[1]}
+    )
+
     key, subkey = jr.split(key)
-    # Generate an initial (random) action
-    u = env.action_space.sample()
+    # Generate an initial action
+    u = policy(sample, 0.0)
     # initialize some particles
     initial_particles = gp_model.get_samples(
         key, jnp.array([sample]), jnp.array([u]), num_particles
@@ -109,8 +108,8 @@ def fit_controller(  # noqa: PLR0913
     policy, opt_state, train_loss = make_step(policy, opt_state)
     losses.append(train_loss)
     step = 0
-    print(f"{step=}, train_loss={train_loss.item()}, ")
-    for step in range(1, num_iters):
+
+    while step < num_iters:
         policy, opt_state, train_loss = make_step(policy, opt_state)
         cost_delta = train_loss - losses[-1]
         # We do the variance first because then we update the expected_cost_delta
@@ -124,29 +123,38 @@ def fit_controller(  # noqa: PLR0913
         ) * expected_cost_delta / jnp.sqrt(variance_cost_delta)
         observed_signal.append(jnp.abs(s_j))
 
-        if len(observed_signal) >= num_iterations_monitoring and (
-            policy.f_drop.p > 0
-            or opt_state.hyperparams["learning_rate"] > min_learning_rate
-        ):
+        if len(observed_signal) >= num_iterations_monitoring:
             if jnp.all(
                 jnp.array(observed_signal[-num_iterations_monitoring:]) < sigma_s
             ):
-                print(f"Decreasing dropout probability at {step=},")
-                # We will decrease the dropout probability
-                dropout_probability = max(policy.f_drop.p - delta_dropout, 0.0)
-                adam_learning_rate = max(
-                    lambda_s * opt_state.hyperparams["learning_rate"], min_learning_rate
-                )
-                sigma_s = lambda_s * sigma_s
-                # # Now set the dropout probability and the adam learning rate
-                where = lambda d: d.f_drop
-                policy = eqx.tree_at(
-                    where, policy, eqx.nn.Dropout(p=dropout_probability)
-                )
-                opt_state.hyperparams["learning_rate"] = adam_learning_rate
+                if (
+                    policy.f_drop.p > 0.0
+                ):  # opt_state.hyperparams["learning_rate"] > min_learning_rate:
+                    # We will decrease the dropout probability
+                    dropout_probability = policy.f_drop.p - delta_dropout
+                    print(
+                        f"Decreasing dropout probability at {step=}, {policy.f_drop.p}, {dropout_probability}"
+                    )
+                    adam_learning_rate = (
+                        lambda_s * opt_state.hyperparams["learning_rate"]
+                    )
+                    sigma_s = lambda_s * sigma_s
+                    # # Now set the dropout probability and the adam learning rate
+                    where = lambda d: d.f_drop
+                    policy = eqx.tree_at(
+                        where, policy, eqx.nn.Dropout(p=dropout_probability)
+                    )
+                    opt_state.hyperparams["learning_rate"] = adam_learning_rate
+        if (
+            opt_state.hyperparams["learning_rate"] < min_learning_rate
+            or policy.f_drop.p < 0.0
+        ):
+            print(f"Early Stopping at {step=} ")
+            step = num_iters
 
         losses.append(train_loss)
         if (step % 50) == 0 or (step == num_iters - 1):
             print(f"{step=}, train_loss={train_loss.item()}, ")
+        step = step + 1
 
     return policy, jnp.array(losses)
