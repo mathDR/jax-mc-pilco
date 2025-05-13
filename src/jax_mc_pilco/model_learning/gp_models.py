@@ -13,6 +13,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import ArrayLike, PyTree
 
+from jax_mc_pilco.model_learning.kernels import SpectralMixture
+
 import optax as ox
 
 config.update("jax_enable_x64", True)
@@ -113,10 +115,10 @@ class DynamicalModel(eqx.Module):
         raise NotImplementedError()
 
 
-class MGPR(DynamicalModel):
+class IMGPR(DynamicalModel):
     """The forward model of the system dynamics.
 
-    Multiple Gaussian Process regression with an independent GP for every output dimension
+    Independent Multiple Gaussian Process regression - has an independent GP for every output dimension
 
     Args:
         kernel (Kernel): The kernel function
@@ -136,9 +138,14 @@ class MGPR(DynamicalModel):
         super().__init__(states, actions, params, mean_func, name)
 
     def build_gp(self, param: ArrayLike) -> tinygp.gp.GaussianProcess:
-        """Constructs a zero mean GP from the parameter list."""
-        kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
-            jnp.exp(param["log_scale"]), kernels.ExpSquared()
+        """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
+        # kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
+        #     jnp.exp(param["log_scale"]), kernels.ExpSquared()
+        # )
+        kernel = SpectralMixture(
+            jnp.exp(param["log_weight"]),
+            jnp.exp(param["log_scale"]),
+            jnp.exp(param["log_freq"]),
         )
         return GaussianProcess(
             kernel,
@@ -158,11 +165,19 @@ class MGPR(DynamicalModel):
         if params is None:
             params = [
                 {
-                    "log_amp": -0.1,
-                    "log_scale": 0.0,
-                    "log_diag": -2.5,
+                    "log_weight": jnp.log(jnp.array([1.0, 1.0])),
+                    "log_scale": jnp.log(jnp.array([10.0, 20.0])),
+                    "log_freq": jnp.log(jnp.array([1.0, 0.5])),
+                    "log_diag": jnp.log(0.1),
                 }
             ] * self.num_outputs
+            # params = [
+            #     {
+            #         "log_amp": -0.1,
+            #         "log_scale": 0.0,
+            #         "log_diag": -2.5,
+            #     }
+            # ] * self.num_outputs
 
         for i in range(self.num_outputs):
             self.models.append(params[i])
