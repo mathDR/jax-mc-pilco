@@ -260,6 +260,7 @@ class IMGPR(DynamicalModel):
         )
         return predictive_moments
 
+    @eqx.filter_vmap
     def get_samples(
         self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
     ) -> Array:

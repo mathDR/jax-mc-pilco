@@ -13,11 +13,9 @@ import gymnasium
 
 def fit_controller(  # noqa: PLR0913
     *,
-    policy: eqx.Module,
-    starting_dropout_probability: Float,
-    env: gymnasium.wrappers.common.TimeLimit,
+    policies: ArrayLike,
+    initial_samples: ArrayLike,
     num_particles: Int,
-    initial_state: ArrayLike,
     timesteps: ArrayLike,
     gp_model: eqx.Module,
     obj_func: Callable,
@@ -27,26 +25,24 @@ def fit_controller(  # noqa: PLR0913
     unroll: Int = 5,
 ) -> Tuple[eqx.Module, Array]:
     """The optimization loop for fitting the policy parameters."""
+
+    @eqx.filter_vmap
+    def evaluate_per_ensemble(model, x, t):
+        return eqx.filter_vmap(model)(x, t)
+
     # Now do a rollout with this model
-    # Generate an initial state uniformly with damping around the final state
-    sample, _ = env.reset(
-        options={"x_init": initial_state[0], "y_init": initial_state[1]}
+    # Generate initial actions
+    breakpoint()
+    initial_actions = evaluate_per_ensemble(
+        policies, initial_samples[:, jnp.newaxis, :], 0.0
     )
-
-    key, subkey = jr.split(key)
-    # Generate an initial action
-    u = policy(sample, 0.0)
     # initialize some particles
+    key, subkey = jr.split(key)
     initial_particles = gp_model.get_samples(
-        key, jnp.array([sample]), jnp.array([u]), num_particles
+        subkey, initial_samples[:, jnp.newaxis, :], initial_actions, num_particles
     )
 
-    # Reset the dropout probability for the policy
-    where = lambda d: d.f_drop
-    policy = eqx.tree_at(where, policy, eqx.nn.Dropout(p=starting_dropout_probability))
-
-    # because we are changing the dropout, this might need to be recompiled
-    # @eqx.debug.assert_max_traces(max_traces=1)
+    @eqx.debug.assert_max_traces(max_traces=1)
     def rollout(
         policy: eqx.Module,
         init_samples: ArrayLike,
@@ -61,7 +57,9 @@ def fit_controller(  # noqa: PLR0913
         ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
             policy_params, key, samples, total_cost = carry
             policy = eqx.combine(policy_params, policy_static)
-            actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
+            actions = evaluate_per_ensemble(
+                policy, samples, jnp.tile(timestep, num_particles)
+            )
 
             key, subkey = jr.split(key)
             samples = model.get_samples(key, samples, actions, 1)
@@ -74,16 +72,17 @@ def fit_controller(  # noqa: PLR0913
         )
         return total_cost
 
-    opt_state = optim.init(eqx.filter(policy, eqx.is_array))
+    opt_states = eqx.filter_vmap(optim.init)(eqx.filter(policies, eqx.is_array))
 
     # Mini-batch random keys to scan over.
     iter_keys = jr.split(key, num_iters)
 
     # Optimisation step.
     @eqx.filter_jit
+    @eqx.filter_vmap
     def make_step(
         policy: eqx.Module,
-        opt_state: PyTree,
+        opt_states: PyTree,
     ) -> Tuple[eqx.Module, PyTree, Float]:
         loss_value, loss_gradient = eqx.filter_value_and_grad(rollout)(
             policy, initial_particles, gp_model, timesteps
@@ -95,15 +94,15 @@ def fit_controller(  # noqa: PLR0913
         return policy, opt_state, loss_value
 
     losses = []
-    policy, opt_state, train_loss = make_step(policy, opt_state)
-    losses.append(train_loss)
+    policies, opt_states, train_losses = make_step(policies, opt_states)
+    losses.append(train_losses)
     step = 0
 
     while step < num_iters:
-        policy, opt_state, train_loss = make_step(policy, opt_state)
-        losses.append(train_loss)
+        policies, opt_states, train_losses = make_step(policies, opt_states)
+        losses.append(train_losses)
         if (step % 50) == 0 or (step == num_iters - 1):
-            print(f"{step=}, train_loss={train_loss.item()}, ")
+            print(f"{step=}, train_losses={train_losses.item()}, ")
         step = step + 1
 
-    return policy, jnp.array(losses)
+    return policies, jnp.array(losses)

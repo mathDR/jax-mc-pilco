@@ -253,7 +253,6 @@ class SumOfGaussians(Controller):
     centers: ArrayLike
     f_linear: eqx.nn.Linear
     scale_factor: Optional[ArrayLike]
-    f_drop: Union[Dropout, eqx.nn.Linear]
 
     def __init__(
         self,
