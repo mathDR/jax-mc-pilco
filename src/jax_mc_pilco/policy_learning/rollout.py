@@ -32,7 +32,6 @@ def fit_controller(  # noqa: PLR0913
 
     # Now do a rollout with this model
     # Generate initial actions
-    breakpoint()
     initial_actions = evaluate_per_ensemble(
         policies, initial_samples[:, jnp.newaxis, :], 0.0
     )

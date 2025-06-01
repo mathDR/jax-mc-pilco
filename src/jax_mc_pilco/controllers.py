@@ -343,3 +343,106 @@ class SumOfGaussians(Controller):
 
         # returns the constrained control action
         return self.f_squash(inputs)
+
+
+class BLEController(Controller):
+    """
+    A Sum of Gaussians controller with a softmax layer to choose best action
+    """
+
+    num_basis: Int
+    log_lengthscales: ArrayLike
+    centers: ArrayLike
+    f_linear: eqx.nn.Linear
+    scale_factor: Optional[ArrayLike]
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        num_basis: int,
+        initial_log_lengthscales: Optional[ArrayLike] = None,
+        initial_centers: Optional[ArrayLike] = None,
+        centers_init_min: Float = -1.0,
+        centers_init_max: Float = 1.0,
+        use_bias: bool = True,
+        scale_factor: Optional[ArrayLike] = None,
+        to_squash: bool = False,
+        max_action: Float = 1.0,
+        key: Optional[ArrayLike] = None,
+    ):
+        super().__init__(
+            state_dim,
+            action_dim,
+            to_squash,
+            max_action,
+        )
+        if key is None:
+            key = jr.key(123)
+
+        # set number of gaussian basis functions
+        self.num_basis = num_basis
+        # get initial log lengthscales
+        if initial_log_lengthscales is None:
+            initial_log_lengthscales = jnp.ones(self.state_dim)
+        self.log_lengthscales = jnp.log(initial_log_lengthscales).reshape([1, -1])
+
+        # get initial centers
+        if initial_centers is None:
+            key, subkey = jr.split(key)
+            initial_centers = centers_init_min * jnp.ones(
+                [self.num_basis, self.state_dim]
+            ) + (centers_init_max - centers_init_min) * jr.uniform(
+                subkey, shape=(self.num_basis, self.state_dim)
+            )
+        self.centers = initial_centers
+        # initilize the linear ouput layer
+        key, subkey = jr.split(key)
+        self.f_linear = eqx.nn.Linear(
+            in_features=self.num_basis,
+            out_features=3,
+            use_bias=use_bias,
+            key=subkey,
+        )
+
+        if scale_factor is None:
+            scale_factor = jnp.ones(state_dim)
+        self.scale_factor = scale_factor.reshape([1, -1])
+
+    def __call__(
+        self,
+        states: ArrayLike,
+        timestep: Optional[Float] = None,
+        key: Optional[ArrayLike] = None,
+    ):
+        """
+        Returns a linear combination of gaussian functions
+        with input given by the distances between that state
+        and the vector of centers of the gaussian functions
+        """
+        if key is None:
+            key = jr.key(123)
+        # get the lengthscales from log
+        lengthscales = jnp.exp(self.log_lengthscales)
+
+        # Need to "inflate" the state to make the angle into trig functioned version
+        states = states.reshape([-1, self.state_dim])
+
+        # normalize new_states and centers
+        norm_states = states / lengthscales
+        norm_centers = self.centers / lengthscales
+        # get the square distances
+        distances = jnp.squeeze(
+            jnp.linalg.norm(norm_states[:, None, :] - norm_centers[None, :, :], axis=2)
+        )
+        rbf_activations = jnp.exp(-0.5 * jnp.square(distances))
+        # apply exp and get output
+        inputs = self.f_linear(rbf_activations).reshape(
+            [
+                3,
+            ]
+        )
+        outputs = jax.nn.softmax(inputs, axis=-1)
+
+        # returns the control action
+        return jnp.argmax(outputs)

@@ -119,7 +119,6 @@ for trial in range(10):
         init_state = [float(factor * jnp.pi * jr.uniform(subkey))]
         key, subkey = jr.split(key)
         init_state.extend([float(factor * epsilon * jr.uniform(subkey))])
-    breakpoint()
     key, subkey = jr.split(key)
     init_samples = make_initial_samples(init_state, num_init_conditions, env)
     control_policies, losses = fit_controller(
@@ -136,6 +135,3 @@ for trial in range(10):
     # plt.plot(losses)
     # plt.title(trial)
     # plt.show()
-
-
-breakpoint()

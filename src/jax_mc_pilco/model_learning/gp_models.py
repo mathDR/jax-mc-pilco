@@ -260,11 +260,11 @@ class IMGPR(DynamicalModel):
         )
         return predictive_moments
 
-    @eqx.filter_vmap
     def get_samples(
         self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
     ) -> Array:
         # Function to sample from a single mean and covariance
+
         def sample_mvnormal(key, mean, cov, num_samples):
             return jr.multivariate_normal(key, mean, cov, (num_samples,))
 
