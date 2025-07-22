@@ -23,31 +23,64 @@ def fit_controller(  # noqa: PLR0913
     obj_func: Callable,
     optim: ox.GradientTransformation,
     key: ArrayLike = jr.PRNGKey(42),
-    num_iters: Int = 100,
+    num_iters,
+    max_epochs: Int = 100,
+    patience: Int = 7,
     unroll: Int = 5,
 ) -> Tuple[eqx.Module, Array]:
     """The optimization loop for fitting the policy parameters."""
-    # Now do a rollout with this model
-    # Generate an initial state uniformly with damping around the final state
-    sample, _ = env.reset(
+
+    sample_train, _ = env.reset(
         options={"x_init": initial_state[0], "y_init": initial_state[1]}
     )
-
     key, subkey = jr.split(key)
     # Generate an initial action
-    u = policy(sample, 0.0)
+    action_train = policy(sample_train, 0.0)
     # initialize some particles
-    initial_particles = gp_model.get_samples(
-        key, jnp.array([sample]), jnp.array([u]), num_particles
+    initial_train_particles = gp_model.get_samples(
+        key, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
 
-    # Reset the dropout probability for the policy
-    where = lambda d: d.f_drop
-    policy = eqx.tree_at(where, policy, eqx.nn.Dropout(p=starting_dropout_probability))
+    sample_val, _ = env.reset(
+        options={"x_init": initial_state[0], "y_init": initial_state[1]}
+    )
+    key, subkey = jr.split(key)
+    # Generate an initial action
+    action_val = policy(sample_val, 0.0)
+    # initialize some particles
+    initial_val_particles = gp_model.get_samples(
+        key, jnp.array([sample_val]), jnp.array([action_val]), num_particles
+    )
 
-    # because we are changing the dropout, this might need to be recompiled
-    # @eqx.debug.assert_max_traces(max_traces=1)
-    def rollout(
+    @eqx.debug.assert_max_traces(max_traces=1)
+    def train_rollout(
+        policy: eqx.Module,
+        init_samples: ArrayLike,
+        model: eqx.Module,
+        timesteps: ArrayLike,
+        key: ArrayLike = jr.key(123),
+    ) -> Float:
+        policy_params, policy_static = eqx.partition(policy, eqx.is_array)
+
+        def one_rollout_step(
+            carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float], timestep: Float
+        ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
+            policy_params, key, samples, total_cost = carry
+            policy = eqx.combine(policy_params, policy_static)
+            actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
+
+            key, subkey = jr.split(key)
+            samples = model.get_samples(key, samples, actions, 1)
+            cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, actions))))
+            return (policy_params, key, samples, total_cost + cost), cost
+
+        total_cost = 0
+        (policy_params, key, samples, total_cost), result = jax.lax.scan(
+            one_rollout_step, (policy_params, key, init_samples, total_cost), timesteps
+        )
+        return total_cost
+
+    def val_rollout(
         policy: eqx.Module,
         init_samples: ArrayLike,
         model: eqx.Module,
@@ -85,8 +118,8 @@ def fit_controller(  # noqa: PLR0913
         policy: eqx.Module,
         opt_state: PyTree,
     ) -> Tuple[eqx.Module, PyTree, Float]:
-        loss_value, loss_gradient = eqx.filter_value_and_grad(rollout)(
-            policy, initial_particles, gp_model, timesteps
+        loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(
+            policy, initial_train_particles, gp_model, timesteps
         )
         updates, opt_state = optim.update(
             loss_gradient, opt_state, eqx.filter(policy, eqx.is_array)
@@ -94,67 +127,25 @@ def fit_controller(  # noqa: PLR0913
         policy = eqx.apply_updates(policy, updates)
         return policy, opt_state, loss_value
 
-    delta_dropout = 0.125
-    min_learning_rate = 0.0001
-    alpha_s = 0.99
-    sigma_s = 0.08
-    num_iterations_monitoring = 200
-    lambda_s = 0.5
+    val_losses = []
+    epoch = 0
+    best_val_epoch = -1
 
-    losses = []
-    variance_cost_delta = 0.0
-    expected_cost_delta = 0.0
-    observed_signal = [0.0]  # (s_0 from the paper)
-    policy, opt_state, train_loss = make_step(policy, opt_state)
-    losses.append(train_loss)
-    step = 0
-
-    while step < num_iters:
+    while epoch < max_epochs:
         policy, opt_state, train_loss = make_step(policy, opt_state)
-        cost_delta = train_loss - losses[-1]
-        # We do the variance first because then we update the expected_cost_delta
-        variance_cost_delta = alpha_s * (
-            variance_cost_delta
-            + (1 - alpha_s) * jnp.square(cost_delta - expected_cost_delta)
-        )
-        expected_cost_delta = alpha_s * expected_cost_delta + (1 - alpha_s) * cost_delta
-        s_j = alpha_s * observed_signal[-1] + (
-            1 - alpha_s
-        ) * expected_cost_delta / jnp.sqrt(variance_cost_delta)
-        observed_signal.append(jnp.abs(s_j))
+        val_loss = val_rollout(policy, initial_val_particles, gp_model, timesteps)
+        val_losses.append(val_loss)
 
-        if len(observed_signal) >= num_iterations_monitoring:
-            if jnp.all(
-                jnp.array(observed_signal[-num_iterations_monitoring:]) < sigma_s
-            ):
-                if (
-                    policy.f_drop.p > 0.0
-                ):  # opt_state.hyperparams["learning_rate"] > min_learning_rate:
-                    # We will decrease the dropout probability
-                    dropout_probability = policy.f_drop.p - delta_dropout
-                    print(
-                        f"Decreasing dropout probability at {step=}, {policy.f_drop.p}, {dropout_probability}"
-                    )
-                    adam_learning_rate = (
-                        lambda_s * opt_state.hyperparams["learning_rate"]
-                    )
-                    sigma_s = lambda_s * sigma_s
-                    # # Now set the dropout probability and the adam learning rate
-                    where = lambda d: d.f_drop
-                    policy = eqx.tree_at(
-                        where, policy, eqx.nn.Dropout(p=dropout_probability)
-                    )
-                    opt_state.hyperparams["learning_rate"] = adam_learning_rate
-        if (
-            opt_state.hyperparams["learning_rate"] < min_learning_rate
-            or policy.f_drop.p < 0.0
-        ):
-            print(f"Early Stopping at {step=} ")
-            step = num_iters
+        if len(val_losses) == 1 or val_loss < val_losses[best_val_epoch]:
+            print(f"\t   (New best performance {val_loss.item()})")
+            best_val_epoch = epoch
+        elif best_val_epoch <= epoch - patience:
+            print(
+                f"Early stopping due to no improvement over the last {patience} epochs"
+            )
+            break
+        if (epoch % 50) == 0 or (epoch == max_epochs - 1):
+            print(f"{epoch=}, validation_loss={val_loss.item()}, ")
+        epoch = epoch + 1
 
-        losses.append(train_loss)
-        if (step % 50) == 0 or (step == num_iters - 1):
-            print(f"{step=}, train_loss={train_loss.item()}, ")
-        step = step + 1
-
-    return policy, jnp.array(losses)
+    return policy, jnp.array(val_losses)

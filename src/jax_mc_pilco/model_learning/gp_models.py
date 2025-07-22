@@ -139,14 +139,14 @@ class IMGPR(DynamicalModel):
 
     def build_gp(self, param: ArrayLike) -> tinygp.gp.GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
-        # kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
-        #     jnp.exp(param["log_scale"]), kernels.ExpSquared()
-        # )
-        kernel = SpectralMixture(
-            jnp.exp(param["log_weight"]),
-            jnp.exp(param["log_scale"]),
-            jnp.exp(param["log_freq"]),
+        kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
+            jnp.exp(param["log_scale"]), kernels.ExpSquared()
         )
+        # kernel = SpectralMixture(
+        #     jnp.exp(param["log_weight"]),
+        #     jnp.exp(param["log_scale"]),
+        #     jnp.exp(param["log_freq"]),
+        # )
         return GaussianProcess(
             kernel,
             self.training_data,
@@ -163,21 +163,21 @@ class IMGPR(DynamicalModel):
         self.models = []
 
         if params is None:
-            params = [
-                {
-                    "log_weight": jnp.log(jnp.array([1.0, 1.0])),
-                    "log_scale": jnp.log(jnp.array([10.0, 20.0])),
-                    "log_freq": jnp.log(jnp.array([1.0, 0.5])),
-                    "log_diag": jnp.log(0.1),
-                }
-            ] * self.num_outputs
             # params = [
             #     {
-            #         "log_amp": -0.1,
-            #         "log_scale": 0.0,
-            #         "log_diag": -2.5,
+            #         "log_weight": jnp.log(jnp.array([1.0, 1.0])),
+            #         "log_scale": jnp.log(jnp.array([10.0, 20.0])),
+            #         "log_freq": jnp.log(jnp.array([1.0, 0.5])),
+            #         "log_diag": jnp.log(0.1),
             #     }
             # ] * self.num_outputs
+            params = [
+                {
+                    "log_amp": -0.1,
+                    "log_scale": 0.0,
+                    "log_diag": -2.5,
+                }
+            ] * self.num_outputs
 
         for i in range(self.num_outputs):
             self.models.append(params[i])
