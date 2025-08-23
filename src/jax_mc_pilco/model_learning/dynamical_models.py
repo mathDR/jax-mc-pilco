@@ -5,8 +5,8 @@ __all__ = ["DynamicalModel"]
 from typing import Callable, Dict, List, Optional, Tuple
 from jax import Array, config, jit, value_and_grad, vmap
 from jax.tree_util import Partial, tree_map
-from tinygp import kernels, GaussianProcess, transforms
-import tinygp
+from gp import kernels, GaussianProcess, transforms
+import gp
 import equinox as eqx
 import jax.numpy as jnp
 
@@ -137,7 +137,7 @@ class IMGPR(DynamicalModel):
     ) -> None:
         super().__init__(states, actions, params, mean_func, name)
 
-    def build_gp(self, param: ArrayLike) -> tinygp.gp.GaussianProcess:
+    def build_gp(self, param: ArrayLike) -> gp.GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
         kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
             jnp.exp(param["log_scale"]), kernels.ExpSquared()
