@@ -1,5 +1,6 @@
 """ Optimize a controller on a given cost function."""
 
+import copy
 import equinox as eqx
 import optax as ox
 import numpy as np
@@ -14,7 +15,6 @@ import gymnasium
 def fit_controller(  # noqa: PLR0913
     *,
     policy: eqx.Module,
-    starting_dropout_probability: Float,
     env: gymnasium.wrappers.common.TimeLimit,
     num_particles: Int,
     initial_state: ArrayLike,
@@ -24,7 +24,7 @@ def fit_controller(  # noqa: PLR0913
     optim: ox.GradientTransformation,
     key: ArrayLike = jr.PRNGKey(42),
     num_iters,
-    max_epochs: Int = 100,
+    max_steps: Int = 100,
     patience: Int = 7,
     unroll: Int = 5,
 ) -> Tuple[eqx.Module, Array]:
@@ -128,24 +128,31 @@ def fit_controller(  # noqa: PLR0913
         return policy, opt_state, loss_value
 
     val_losses = []
-    epoch = 0
-    best_val_epoch = -1
+    step = 0
+    best_loss = np.inf
+    iterations_since_improvement = 0
 
-    while epoch < max_epochs:
+    while step < max_steps:
         policy, opt_state, train_loss = make_step(policy, opt_state)
         val_loss = val_rollout(policy, initial_val_particles, gp_model, timesteps)
         val_losses.append(val_loss)
 
-        if len(val_losses) == 1 or val_loss < val_losses[best_val_epoch]:
+        if len(val_losses) == 1 or val_loss < best_loss:
             print(f"\t   (New best performance {val_loss.item()})")
-            best_val_epoch = epoch
-        elif best_val_epoch <= epoch - patience:
+            best_loss = val_loss
+            best_policy = jax.tree.map(
+                lambda x: x.copy() if eqx.is_array(x) else copy.deepcopy(x), policy
+            )
+            iterations_since_improvement = 0
+
+        elif iterations_since_improvement <= patience:
             print(
-                f"Early stopping due to no improvement over the last {patience} epochs"
+                f"Early stopping due to no improvement over the last {patience} steps"
             )
             break
         if (epoch % 50) == 0 or (epoch == max_epochs - 1):
             print(f"{epoch=}, validation_loss={val_loss.item()}, ")
-        epoch = epoch + 1
+        step += 1
+        iterations_since_improvement += 1
 
-    return policy, jnp.array(val_losses)
+    return best_policy, jnp.array(val_losses)
