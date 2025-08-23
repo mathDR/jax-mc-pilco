@@ -14,17 +14,17 @@ __all__ = ["Mean", "Conditioned"]
 
 from abc import abstractmethod
 from typing import Callable
+from jaxtyping import ArrayLike
 
 import equinox as eqx
 import jax
 
-from tinygp.helpers import JAXArray
-from tinygp.kernels.base import Kernel
+from kernels.base import Kernel
 
 
 class MeanBase(eqx.Module):
     @abstractmethod
-    def __call__(self, X: JAXArray) -> JAXArray:
+    def __call__(self, X: jax.Array) -> jax.Array:
         raise NotImplementedError
 
 
@@ -39,16 +39,16 @@ class Mean(MeanBase):
             signature.
     """
 
-    value: JAXArray | None = None
-    func: Callable[[JAXArray], JAXArray] | None = eqx.field(default=None, static=True)
+    value: ArrayLike | None = None
+    func: Callable[[ArrayLike], jax.Array] | None = eqx.field(default=None, static=True)
 
-    def __init__(self, value: JAXArray | Callable[[JAXArray], JAXArray]):
+    def __init__(self, value: ArrayLike | Callable[[ArrayLike], jax.Array]):
         if callable(value):
             self.func = value
         else:
             self.value = value
 
-    def __call__(self, X: JAXArray) -> JAXArray:
+    def __call__(self, X: ArrayLike) -> jax.Array:
         if self.value is None:
             assert self.func is not None
             return self.func(X)
@@ -72,13 +72,13 @@ class Conditioned(MeanBase):
             ``include_mean`` is ``True``.
     """
 
-    X: JAXArray
-    alpha: JAXArray
+    X: ArrayLike
+    alpha: ArrayLike
     kernel: Kernel
     include_mean: bool
     mean_function: MeanBase | None = None
 
-    def __call__(self, X: JAXArray) -> JAXArray:
+    def __call__(self, X: ArrayLike) -> jax.Array:
         Ks = jax.vmap(self.kernel.evaluate, in_axes=(None, 0), out_axes=0)(X, self.X)
         mu = Ks @ self.alpha
         if self.include_mean and self.mean_function is not None:

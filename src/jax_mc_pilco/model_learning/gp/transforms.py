@@ -11,13 +11,13 @@ __all__ = ["Transform", "Linear", "Cholesky", "Subspace"]
 from collections.abc import Sequence
 from functools import partial
 from typing import Any, Callable
+from jaxtyping import ArrayLike
 
 import equinox as eqx
 import jax.numpy as jnp
 from jax.scipy import linalg
 
-from tinygp.helpers import JAXArray
-from tinygp.kernels.base import Kernel
+from kernels.base import Kernel
 
 
 class Transform(Kernel):
@@ -32,7 +32,7 @@ class Transform(Kernel):
     transform: Callable[[Any], Any] = eqx.field(static=True)
     kernel: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return self.kernel.evaluate(self.transform(X1), self.transform(X2))
 
 
@@ -53,15 +53,15 @@ class Linear(Kernel):
         ... )
 
     Args:
-        scale (JAXArray): A 0-, 1-, or 2-dimensional array specifying the
+        scale (ArrayLike): A 0-, 1-, or 2-dimensional array specifying the
             scale of this transform.
         kernel (Kernel): The kernel to use in the transformed space.
     """
 
-    scale: JAXArray
+    scale: ArrayLike
     kernel: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         if jnp.ndim(self.scale) < 2:
             transform = partial(jnp.multiply, self.scale)
         elif jnp.ndim(self.scale) == 2:
@@ -88,16 +88,16 @@ class Cholesky(Kernel):
         ... )
 
     Args:
-        factor (JAXArray): A 0-, 1-, or 2-dimensional array specifying the
+        factor (ArrayLike): A 0-, 1-, or 2-dimensional array specifying the
             Cholesky factor. If 2-dimensional, this must be a lower
             triangular matrix, but this is not checked.
         kernel (Kernel): The kernel to use in the transformed space.
     """
 
-    factor: JAXArray
+    factor: ArrayLike
     kernel: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         if jnp.ndim(self.factor) < 2:
             transform = partial(jnp.multiply, 1.0 / self.factor)
         elif jnp.ndim(self.factor) == 2:
@@ -108,15 +108,15 @@ class Cholesky(Kernel):
 
     @classmethod
     def from_parameters(
-        cls, diagonal: JAXArray, off_diagonal: JAXArray, kernel: Kernel
+        cls, diagonal: ArrayLike, off_diagonal: ArrayLike, kernel: Kernel
     ) -> Cholesky:
         """Build a Cholesky transform with a sensible parameterization
 
         Args:
-            diagonal (JAXArray): An ``(ndim,)`` array with the diagonal
+            diagonal (ArrayLike): An ``(ndim,)`` array with the diagonal
                 elements of ``factor``. These must be positive, but this
                 is not checked.
-            off_diagonal (JAXArray): An ``((ndim - 1) * ndim,)`` array
+            off_diagonal (ArrayLike): An ``((ndim - 1) * ndim,)`` array
                 with the off-diagonal elements of ``factor``.
             kernel (Kernel): The kernel to use in the transformed space.
         """
@@ -158,5 +158,5 @@ class Subspace(Kernel):
     axis: Sequence[int] | int = eqx.field(static=True)
     kernel: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return self.kernel.evaluate(X1[self.axis], X2[self.axis])

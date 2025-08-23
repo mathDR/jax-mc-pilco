@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-__all__ = ["Solver"]
+__all__ = ["DirectSolver"]
+
+from typing import Any
+from jaxtyping import ArrayLike
+import jax.numpy as jnp
+import numpy as np
+from jax.scipy import linalg
 
 from abc import abstractmethod
 from typing import Any
@@ -12,71 +18,82 @@ from kernels.base import Kernel
 from noise import Noise
 
 
-class Solver(eqx.Module):
+class DirectSolver(eqx.Module):
+    """A direct solver that uses ``jax``'s built in Cholesky factorization
+
+    You generally won't instantiate this object directly but, if you do, you'll
+    probably want to use the :func:`DirectSolver.init` method instead of the
+    usual constructor.
+    """
+
+    X: ArrayLike
+    variance_value: ArrayLike
+    covariance_value: ArrayLike
+    scale_tril: ArrayLike
+
     def __init__(
         self,
-        kernel: Kernel,
+        kernel: kernels.Kernel,
         X: ArrayLike,
         noise: Noise,
         *,
         covariance: Any | None = None,
     ):
-        del kernel, X, noise, covariance
-        raise NotImplementedError
+        """Build a :class:`DirectSolver` for a given kernel and coordinates
 
-    # TODO(dfm): Add a deprecation warning. This exists for backwards
-    # compatibility, but using __init__ directly is preferred.
-    @classmethod
-    def init(
-        cls,
-        kernel: Kernel,
-        X: ArrayLike,
-        noise: Noise,
-        *,
-        covariance: Any | None = None,
-    ) -> Solver:
-        return cls(kernel, X, noise, covariance=covariance)
+        Args:
+            kernel: The kernel function.
+            X: The input coordinates.
+            noise: The noise model for the process.
+            covariance: Optionally, a pre-computed array with the covariance
+                matrix. This should be equal to the result of calling ``kernel``
+                and adding ``diag``, but that is not checked.
+        """
+        self.X = X
+        self.variance_value = kernel(X) + noise.diagonal()
+        if covariance is None:
+            covariance = kernel(X, X) + noise
+        self.covariance_value = covariance
+        self.scale_tril = linalg.cholesky(covariance, lower=True)
 
-    @abstractmethod
     def variance(self) -> jax.Array:
-        """The diagonal of the covariance matrix"""
-        raise NotImplementedError
+        return self.variance_value
 
-    @abstractmethod
     def covariance(self) -> jax.Array:
-        """The evaluated covariance matrix"""
-        raise NotImplementedError
+        return self.covariance_value
 
-    @abstractmethod
     def normalization(self) -> jax.Array:
-        """The multivariate normal normalization constant
+        return jnp.sum(
+            jnp.log(jnp.diag(self.scale_tril))
+        ) + 0.5 * self.scale_tril.shape[0] * np.log(2 * np.pi)
 
-        This should be ``(log_det + n*log(2*pi))/2``, where ``n`` is the size of
-        the covariance matrix, and ``log_det`` is the log determinant of the
-        matrix.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def solve_triangular(self, y: ArrayLike, *, transpose: bool = False) -> jax.Array:
-        """Solve the lower triangular linear system defined by this solver
+        if transpose:
+            return linalg.solve_triangular(self.scale_tril, y, lower=True, trans=1)
+        else:
+            return linalg.solve_triangular(self.scale_tril, y, lower=True)
 
-        If the covariance matrix is ``K = L @ L.T`` for some lower triangular
-        matrix ``L``, this method solves ``L @ x = y`` for some ``y``. If the
-        ``transpose`` parameter is ``True``, this instead solves ``L.T @ x =
-        y``.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def dot_triangular(self, y: ArrayLike) -> jax.Array:
-        """Compute a matrix product with the lower triangular linear system
+        return jnp.einsum("ij,j...->i...", self.scale_tril, y)
 
-        If the covariance matrix is ``K = L @ L.T`` for some lower triangular
-        matrix ``L``, this method returns ``L @ y`` for some ``y``.
+    def condition(
+        self, kernel: kernels.Kernel, X_test: ArrayLike | None, noise: Noise
+    ) -> Any:
+        """Compute the covariance matrix for a conditional GP
+
+        Args:
+            kernel: The kernel for the covariance between the observed and
+                predicted data.
+            X_test: The coordinates of the predicted points. Defaults to the
+                input coordinates.
+            noise: The noise model for the predicted process.
         """
-        raise NotImplementedError
+        if X_test is None:
+            Ks = kernel(self.X, self.X)
+            Kss = Ks + noise
+        else:
+            Ks = kernel(self.X, X_test)
+            Kss = kernel(X_test, X_test) + noise
 
-    @abstractmethod
-    def condition(self, kernel: Kernel, X_test: ArrayLike | None, noise: Noise) -> Any:
-        raise NotImplementedError
+        A = self.solve_triangular(Ks)
+        return Kss - A.transpose() @ A

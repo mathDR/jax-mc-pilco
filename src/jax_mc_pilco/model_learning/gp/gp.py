@@ -10,22 +10,21 @@ from typing import (
     Callable,
     NamedTuple,
 )
+from jaxtyping import ArrayLike
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tinygp import kernels, means
-from tinygp.helpers import JAXArray
-from tinygp.kernels.quasisep import Quasisep
-from tinygp.noise import Diagonal, Noise
-from tinygp.solvers import DirectSolver, QuasisepSolver
-from tinygp.solvers.quasisep.core import SymmQSM
-from tinygp.solvers.solver import Solver
+import kernels
+import means
+
+from noise import Diagonal, Noise
+from solvers.solver import Solver
 
 if TYPE_CHECKING:
-    from tinygp.numpyro_support import TinyDistribution
+    from numpyro_support import TinyDistribution
 
 
 class GaussianProcess(eqx.Module):
@@ -33,10 +32,10 @@ class GaussianProcess(eqx.Module):
 
     Args:
         kernel (Kernel): The kernel function
-        X (JAXArray): The input coordinates. This can be any PyTree that is
+        X (ArrayLike): The input coordinates. This can be any PyTree that is
             compatible with ``kernel`` where the zeroth dimension is ``N_data``,
             the size of the data set.
-        diag (JAXArray, optional): The value to add to the diagonal of the
+        diag (ArrayLike, optional): The value to add to the diagonal of the
             covariance matrix, often used to capture measurement uncertainty.
             This should be a scalar or have the shape ``(N_data,)``. If not
             provided, this will default to the square root of machine epsilon
@@ -56,22 +55,25 @@ class GaussianProcess(eqx.Module):
     num_data: int = eqx.field(static=True)
     dtype: np.dtype = eqx.field(static=True)
     kernel: kernels.Kernel
-    X: JAXArray
+    X: ArrayLike
     mean_function: means.MeanBase
-    mean: JAXArray
+    mean: ArrayLike
     noise: Noise
     solver: Solver
 
     def __init__(
         self,
         kernel: kernels.Kernel,
-        X: JAXArray,
+        X: ArrayLike,
         *,
-        diag: JAXArray | None = None,
+        diag: ArrayLike | None = None,
         noise: Noise | None = None,
-        mean: means.MeanBase | Callable[[JAXArray], JAXArray] | JAXArray | None = None,
+        mean: means.MeanBase
+        | Callable[[ArrayLike], jax.Array]
+        | ArrayLike
+        | None = None,
         solver: Any | None = None,
-        mean_value: JAXArray | None = None,
+        mean_value: ArrayLike | None = None,
         covariance_value: Any | None = None,
         **solver_kwargs: Any,
     ):
@@ -100,10 +102,7 @@ class GaussianProcess(eqx.Module):
         self.noise = noise
 
         if solver is None:
-            if isinstance(covariance_value, SymmQSM) or isinstance(kernel, Quasisep):
-                solver = QuasisepSolver
-            else:
-                solver = DirectSolver
+            solver = DirectSolver
         self.solver = solver(
             kernel,
             self.X,
@@ -113,22 +112,22 @@ class GaussianProcess(eqx.Module):
         )
 
     @property
-    def loc(self) -> JAXArray:
+    def loc(self) -> jax.Array:
         return self.mean
 
     @property
-    def variance(self) -> JAXArray:
+    def variance(self) -> jax.Array:
         return self.solver.variance()
 
     @property
-    def covariance(self) -> JAXArray:
+    def covariance(self) -> jax.Array:
         return self.solver.covariance()
 
-    def log_probability(self, y: JAXArray) -> JAXArray:
+    def log_probability(self, y: ArrayLike) -> jax.Array:
         """Compute the log probability of this multivariate normal
 
         Args:
-            y (JAXArray): The observed data. This should have the shape
+            y (ArrayLike): The observed data. This should have the shape
                 ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
                 data provided when instantiating this object.
 
@@ -140,10 +139,10 @@ class GaussianProcess(eqx.Module):
 
     def condition(
         self,
-        y: JAXArray,
-        X_test: JAXArray | None = None,
+        y: ArrayLike,
+        X_test: ArrayLike | None = None,
         *,
-        diag: JAXArray | None = None,
+        diag: ArrayLike | None = None,
         noise: Noise | None = None,
         include_mean: bool = True,
         kernel: kernels.Kernel | None = None,
@@ -151,15 +150,15 @@ class GaussianProcess(eqx.Module):
         """Condition the model on observed data and
 
         Args:
-            y (JAXArray): The observed data. This should have the shape
+            y (ArrayLike): The observed data. This should have the shape
                 ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
                 data provided when instantiating this object.
-            X_test (JAXArray, optional): The coordinates where the prediction
+            X_test (ArrayLike, optional): The coordinates where the prediction
                 should be evaluated. This should have a data type compatible
                 with the ``X`` data provided when instantiating this object. If
                 it is not provided, ``X`` will be used by default, so the
                 predictions will be made.
-            diag (JAXArray, optional): Will be passed as the diagonal to the
+            diag (ArrayLike, optional): Will be passed as the diagonal to the
                 conditioned ``GaussianProcess`` object, so this can be used to
                 introduce, for example, observational noise to predicted data.
             include_mean (bool, optional): If ``True`` (default), the predicted
@@ -229,21 +228,21 @@ class GaussianProcess(eqx.Module):
     )
     def predict(
         self,
-        y: JAXArray,
-        X_test: JAXArray | None = None,
+        y: ArrayLike,
+        X_test: ArrayLike | None = None,
         *,
         kernel: kernels.Kernel | None = None,
         include_mean: bool = True,
         return_var: bool = False,
         return_cov: bool = False,
-    ) -> JAXArray | tuple[JAXArray, JAXArray]:
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
         """Predict the GP model at new test points conditioned on observed data
 
         Args:
-            y (JAXArray): The observed data. This should have the shape
+            y (ArrayLike): The observed data. This should have the shape
                 ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
                 data provided when instantiating this object.
-            X_test (JAXArray, optional): The coordinates where the prediction
+            X_test (ArrayLike, optional): The coordinates where the prediction
                 should be evaluated. This should have a data type compatible
                 with the ``X`` data provided when instantiating this object. If
                 it is not provided, ``X`` will be used by default, so the
@@ -275,7 +274,7 @@ class GaussianProcess(eqx.Module):
         self,
         key: jax.random.KeyArray,
         shape: Sequence[int] | None = None,
-    ) -> JAXArray:
+    ) -> jax.Array:
         """Generate samples from the prior process
 
         Args:
@@ -301,7 +300,7 @@ class GaussianProcess(eqx.Module):
         self,
         key: jax.random.KeyArray,
         shape: Sequence[int] | None,
-    ) -> JAXArray:
+    ) -> jax.Array:
         if shape is None:
             shape = (self.num_data,)
         else:
@@ -312,22 +311,22 @@ class GaussianProcess(eqx.Module):
         )
 
     @jax.jit
-    def _compute_log_prob(self, alpha: JAXArray) -> JAXArray:
+    def _compute_log_prob(self, alpha: ArrayLike) -> jax.Array:
         loglike = -0.5 * jnp.sum(jnp.square(alpha)) - self.solver.normalization()
         return jnp.where(jnp.isfinite(loglike), loglike, -jnp.inf)
 
     @jax.jit
-    def _get_alpha(self, y: JAXArray) -> JAXArray:
+    def _get_alpha(self, y: ArrayLike) -> jax.Array:
         return self.solver.solve_triangular(y - self.loc)
 
     @partial(jax.jit, static_argnums=(3,))
     def _condition(
         self,
-        y: JAXArray,
-        X_test: JAXArray | None,
+        y: ArrayLike,
+        X_test: ArrayLike | None,
         include_mean: bool,
         kernel: kernels.Kernel | None = None,
-    ) -> tuple[JAXArray, JAXArray, JAXArray]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         alpha = self._get_alpha(y)
         log_prob = self._compute_log_prob(alpha)
 
@@ -369,7 +368,7 @@ class ConditionResult(NamedTuple):
     below.
     """
 
-    log_probability: JAXArray
+    log_probability: ArrayLike
     """The log probability of the conditioned model
 
     In other words, this is the marginal likelihood for the kernel parameters,
@@ -386,7 +385,7 @@ class ConditionResult(NamedTuple):
     """
 
 
-def _default_diag(reference: JAXArray) -> JAXArray:
+def _default_diag(reference: ArrayLike) -> jax.Array:
     """Default to adding some amount of jitter to the diagonal, just in case,
     we use sqrt(eps) for the dtype of the mean function because that seems to
     give sensible results in general.
