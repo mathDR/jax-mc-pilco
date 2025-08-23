@@ -3,11 +3,9 @@ from typing import Any
 import jax
 from jax._src.public_test_util import check_close
 
-from tinygp.helpers import JAXArray
-
 
 def assert_allclose(
-    calculated: JAXArray, expected: JAXArray, *args: Any, **kwargs: Any
+    calculated: jax.Array, expected: jax.Array, *args: Any, **kwargs: Any
 ):
     kwargs["atol"] = kwargs.get(
         "atol",
