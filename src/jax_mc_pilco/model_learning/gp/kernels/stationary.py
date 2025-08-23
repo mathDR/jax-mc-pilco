@@ -31,9 +31,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from helpers import JAXArray
-from kernels.base import Kernel
-from kernels.distance import Distance, L1Distance, L2Distance
+from base import Kernel
+from distance import Distance, L1Distance, L2Distance
 
 
 class Stationary(Kernel):
@@ -74,7 +73,7 @@ class Exp(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         if jnp.ndim(self.scale):
             raise ValueError(
                 "Only scalar scales are permitted for stationary kernels; use"
@@ -102,7 +101,7 @@ class ExpSquared(Stationary):
 
     distance: Distance = eqx.field(default_factory=L2Distance)
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
         return jnp.exp(-0.5 * r2)
 
@@ -124,7 +123,7 @@ class Matern32(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         r = self.distance.distance(X1, X2) / self.scale
         arg = np.sqrt(3) * r
         return (1 + arg) * jnp.exp(-arg)
@@ -148,7 +147,7 @@ class Matern52(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         r = self.distance.distance(X1, X2) / self.scale
         arg = np.sqrt(5) * r
         return (1 + arg + jnp.square(arg) / 3) * jnp.exp(-arg)
@@ -171,7 +170,7 @@ class Cosine(Stationary):
         scale: The parameter :math:`P`.
     """
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         r = self.distance.distance(X1, X2) / self.scale
         return jnp.cos(2 * jnp.pi * r)
 
@@ -194,13 +193,13 @@ class ExpSineSquared(Stationary):
         gamma: The parameter :math:`\Gamma`.
     """
 
-    gamma: JAXArray | float | None = None
+    gamma: jax.Array | float | None = None
 
     def __check_init__(self):
         if self.gamma is None:
             raise ValueError("Missing required argument 'gamma'")
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         assert self.gamma is not None
         r = self.distance.distance(X1, X2) / self.scale
         return jnp.exp(-self.gamma * jnp.square(jnp.sin(jnp.pi * r)))
@@ -224,13 +223,13 @@ class RationalQuadratic(Stationary):
         alpha: The parameter :math:`\alpha`.
     """
 
-    alpha: JAXArray | float | None = None
+    alpha: jax.Array | float | None = None
 
     def __check_init__(self):
         if self.alpha is None:
             raise ValueError("Missing required argument 'alpha'")
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         assert self.alpha is not None
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
         return (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha

@@ -13,16 +13,17 @@ __all__ = [
 
 from abc import abstractmethod
 from collections.abc import Sequence
+from jaxtyping import ArrayLike
+
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from tinygp.helpers import JAXArray
 
 if TYPE_CHECKING:
-    from tinygp.solvers.solver import Solver
+    from solvers.solver import Solver
 
 Axis = Union[int, Sequence[int]]
 
@@ -36,7 +37,7 @@ class Kernel(eqx.Module):
     """
 
     @abstractmethod
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         """Evaluate the kernel at a pair of input coordinates
 
         This should be overridden be subclasses to return the kernel-specific
@@ -56,7 +57,7 @@ class Kernel(eqx.Module):
         del X1, X2
         raise NotImplementedError
 
-    def evaluate_diag(self, X: JAXArray) -> JAXArray:
+    def evaluate_diag(self, X: ArrayLike) -> jax.Array:
         """Evaluate the kernel on its diagonal
 
         The default implementation simply calls :func:`Kernel.evaluate` with
@@ -67,10 +68,10 @@ class Kernel(eqx.Module):
 
     def matmul(
         self,
-        X1: JAXArray,
-        X2: JAXArray | None = None,
-        y: JAXArray | None = None,
-    ) -> JAXArray:
+        X1: ArrayLike,
+        X2: ArrayLike | None = None,
+        y: ArrayLike | None = None,
+    ) -> jax.Array:
         if y is None:
             assert X2 is not None
             y = X2
@@ -81,7 +82,7 @@ class Kernel(eqx.Module):
 
         return jnp.dot(self(X1, X2), y)
 
-    def __call__(self, X1: JAXArray, X2: JAXArray | None = None) -> JAXArray:
+    def __call__(self, X1: ArrayLike, X2: ArrayLike | None = None) -> jax.Array:
         if X2 is None:
             k = jax.vmap(self.evaluate_diag, in_axes=0)(X1)
             if k.ndim != 1:
@@ -102,7 +103,7 @@ class Kernel(eqx.Module):
             )
         return k
 
-    def __add__(self, other: Kernel | JAXArray) -> Kernel:
+    def __add__(self, other: Kernel | ArrayLike) -> Kernel:
         if isinstance(other, Kernel):
             return Sum(self, other)
         return Sum(self, Constant(other))
@@ -115,7 +116,7 @@ class Kernel(eqx.Module):
             return Sum(other, self)
         return Sum(Constant(other), self)
 
-    def __mul__(self, other: Kernel | JAXArray) -> Kernel:
+    def __mul__(self, other: Kernel | ArrayLike) -> Kernel:
         if isinstance(other, Kernel):
             return Product(self, other)
         return Product(self, Constant(other))
@@ -137,17 +138,17 @@ class Conditioned(Kernel):
             the kernel used by the original process.
     """
 
-    X: JAXArray
+    X: ArrayLike
     solver: Solver
     kernel: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         kernel_vec = jax.vmap(self.kernel.evaluate, in_axes=(0, None))
         K1 = self.solver.solve_triangular(kernel_vec(self.X, X1))
         K2 = self.solver.solve_triangular(kernel_vec(self.X, X2))
         return self.kernel.evaluate(X1, X2) - K1.transpose() @ K2
 
-    def evaluate_diag(self, X: JAXArray) -> JAXArray:
+    def evaluate_diag(self, X: ArrayLike) -> jax.Array:
         kernel_vec = jax.vmap(self.kernel.evaluate, in_axes=(0, None))
         K = self.solver.solve_triangular(kernel_vec(self.X, X))
         return self.kernel.evaluate_diag(X) - K.transpose() @ K
@@ -163,7 +164,7 @@ class Custom(Kernel):
 
     function: Callable[[Any, Any], Any] = eqx.field(static=True)
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return self.function(X1, X2)
 
 
@@ -173,7 +174,7 @@ class Sum(Kernel):
     kernel1: Kernel
     kernel2: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return self.kernel1.evaluate(X1, X2) + self.kernel2.evaluate(X1, X2)
 
 
@@ -183,7 +184,7 @@ class Product(Kernel):
     kernel1: Kernel
     kernel2: Kernel
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return self.kernel1.evaluate(X1, X2) * self.kernel2.evaluate(X1, X2)
 
 
@@ -200,9 +201,9 @@ class Constant(Kernel):
         c: The parameter :math:`c` in the above equation.
     """
 
-    value: JAXArray | float
+    value: jax.Array | float
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         del X1, X2
         if jnp.ndim(self.value) != 0:
             raise ValueError("The value of a constant kernel must be a scalar")
@@ -219,7 +220,7 @@ class DotProduct(Kernel):
     with no parameters.
     """
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         if jnp.ndim(X1) == 0:
             return X1 * X2
         return X1 @ X2
@@ -239,11 +240,11 @@ class Polynomial(Kernel):
         sigma: The parameter :math:`\sigma`.
     """
 
-    order: JAXArray | float
-    scale: JAXArray | float = eqx.field(default_factory=lambda: jnp.ones(()))
-    sigma: JAXArray | float = eqx.field(default_factory=lambda: jnp.zeros(()))
+    order: ArrayLike | float
+    scale: ArrayLike | float = eqx.field(default_factory=lambda: jnp.ones(()))
+    sigma: ArrayLike | float = eqx.field(default_factory=lambda: jnp.zeros(()))
 
-    def evaluate(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
         return (
             (X1 / self.scale) @ (X2 / self.scale) + jnp.square(self.sigma)
         ) ** self.order

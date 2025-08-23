@@ -1,5 +1,5 @@
 """
-The primary model building interface in ``tinygp`` is via "kernels", which are
+The primary model building interface in is via "kernels", which are
 typically constructed as sums and products of objects defined in this
 subpackage, or by subclassing :class:`Kernel` as discussed in the :ref:`kernels`
 tutorial. Many of the most commonly used kernels are described in the
@@ -8,7 +8,6 @@ fundamental building blocks.
 """
 
 __all__ = [
-    "quasisep",
     "Distance",
     "L1Distance",
     "L2Distance",
@@ -28,10 +27,10 @@ __all__ = [
     "Cosine",
     "ExpSineSquared",
     "RationalQuadratic",
+    "SpectralMixture",
 ]
 
-from tinygp.kernels import quasisep
-from tinygp.kernels.base import (
+from gp.kernels.base import (
     Conditioned,
     Constant,
     Custom,
@@ -41,8 +40,8 @@ from tinygp.kernels.base import (
     Product,
     Sum,
 )
-from tinygp.kernels.distance import Distance, L1Distance, L2Distance
-from tinygp.kernels.stationary import (
+from gp.kernels.distance import Distance, L1Distance, L2Distance
+from gp.kernels.stationary import (
     Cosine,
     Exp,
     ExpSineSquared,
@@ -50,5 +49,6 @@ from tinygp.kernels.stationary import (
     Matern32,
     Matern52,
     RationalQuadratic,
+    SpectralMixture,
     Stationary,
 )
