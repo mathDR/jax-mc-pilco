@@ -3,15 +3,14 @@ from __future__ import annotations
 __all__ = ["DirectSolver"]
 
 from typing import Any
-
+from jaxtyping import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy import linalg
 
-from tinygp import kernels
-from tinygp.helpers import JAXArray
-from tinygp.noise import Noise
-from tinygp.solvers.solver import Solver
+from kernels.base import Kernel
+from noise import Noise
+from solver import Solver
 
 
 class DirectSolver(Solver):
@@ -22,15 +21,15 @@ class DirectSolver(Solver):
     usual constructor.
     """
 
-    X: JAXArray
-    variance_value: JAXArray
-    covariance_value: JAXArray
-    scale_tril: JAXArray
+    X: ArrayLike
+    variance_value: ArrayLike
+    covariance_value: ArrayLike
+    scale_tril: ArrayLike
 
     def __init__(
         self,
         kernel: kernels.Kernel,
-        X: JAXArray,
+        X: ArrayLike,
         noise: Noise,
         *,
         covariance: Any | None = None,
@@ -52,28 +51,28 @@ class DirectSolver(Solver):
         self.covariance_value = covariance
         self.scale_tril = linalg.cholesky(covariance, lower=True)
 
-    def variance(self) -> JAXArray:
+    def variance(self) -> jax.Array:
         return self.variance_value
 
-    def covariance(self) -> JAXArray:
+    def covariance(self) -> jax.Array:
         return self.covariance_value
 
-    def normalization(self) -> JAXArray:
+    def normalization(self) -> jax.Array:
         return jnp.sum(
             jnp.log(jnp.diag(self.scale_tril))
         ) + 0.5 * self.scale_tril.shape[0] * np.log(2 * np.pi)
 
-    def solve_triangular(self, y: JAXArray, *, transpose: bool = False) -> JAXArray:
+    def solve_triangular(self, y: ArrayLike, *, transpose: bool = False) -> jax.Array:
         if transpose:
             return linalg.solve_triangular(self.scale_tril, y, lower=True, trans=1)
         else:
             return linalg.solve_triangular(self.scale_tril, y, lower=True)
 
-    def dot_triangular(self, y: JAXArray) -> JAXArray:
+    def dot_triangular(self, y: ArrayLike) -> jax.Array:
         return jnp.einsum("ij,j...->i...", self.scale_tril, y)
 
     def condition(
-        self, kernel: kernels.Kernel, X_test: JAXArray | None, noise: Noise
+        self, kernel: kernels.Kernel, X_test: ArrayLike | None, noise: Noise
     ) -> Any:
         """Compute the covariance matrix for a conditional GP
 

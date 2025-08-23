@@ -4,19 +4,19 @@ __all__ = ["Solver"]
 
 from abc import abstractmethod
 from typing import Any
+from jaxtyping import ArrayLike
 
 import equinox as eqx
 
-from tinygp.helpers import JAXArray
-from tinygp.kernels.base import Kernel
-from tinygp.noise import Noise
+from kernels.base import Kernel
+from noise import Noise
 
 
 class Solver(eqx.Module):
     def __init__(
         self,
         kernel: Kernel,
-        X: JAXArray,
+        X: ArrayLike,
         noise: Noise,
         *,
         covariance: Any | None = None,
@@ -30,7 +30,7 @@ class Solver(eqx.Module):
     def init(
         cls,
         kernel: Kernel,
-        X: JAXArray,
+        X: ArrayLike,
         noise: Noise,
         *,
         covariance: Any | None = None,
@@ -38,17 +38,17 @@ class Solver(eqx.Module):
         return cls(kernel, X, noise, covariance=covariance)
 
     @abstractmethod
-    def variance(self) -> JAXArray:
+    def variance(self) -> jax.Array:
         """The diagonal of the covariance matrix"""
         raise NotImplementedError
 
     @abstractmethod
-    def covariance(self) -> JAXArray:
+    def covariance(self) -> jax.Array:
         """The evaluated covariance matrix"""
         raise NotImplementedError
 
     @abstractmethod
-    def normalization(self) -> JAXArray:
+    def normalization(self) -> jax.Array:
         """The multivariate normal normalization constant
 
         This should be ``(log_det + n*log(2*pi))/2``, where ``n`` is the size of
@@ -58,7 +58,7 @@ class Solver(eqx.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def solve_triangular(self, y: JAXArray, *, transpose: bool = False) -> JAXArray:
+    def solve_triangular(self, y: ArrayLike, *, transpose: bool = False) -> jax.Array:
         """Solve the lower triangular linear system defined by this solver
 
         If the covariance matrix is ``K = L @ L.T`` for some lower triangular
@@ -69,7 +69,7 @@ class Solver(eqx.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def dot_triangular(self, y: JAXArray) -> JAXArray:
+    def dot_triangular(self, y: ArrayLike) -> jax.Array:
         """Compute a matrix product with the lower triangular linear system
 
         If the covariance matrix is ``K = L @ L.T`` for some lower triangular
@@ -78,5 +78,5 @@ class Solver(eqx.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def condition(self, kernel: Kernel, X_test: JAXArray | None, noise: Noise) -> Any:
+    def condition(self, kernel: Kernel, X_test: ArrayLike | None, noise: Noise) -> Any:
         raise NotImplementedError
