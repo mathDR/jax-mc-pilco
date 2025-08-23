@@ -21,7 +21,7 @@ import kernels
 import means
 
 from noise import Diagonal, Noise
-from solvers.solver import Solver
+from solver import DirectSolver
 
 if TYPE_CHECKING:
     from numpyro_support import TinyDistribution
@@ -48,8 +48,6 @@ class GaussianProcess(eqx.Module):
             this is provided, the ``diag`` parameter will be ignored.
         mean (Callable, optional): A callable or constant mean function that
             will be evaluated with the ``X`` as input: ``mean(X)``
-        solver: The solver type to be used to execute the required linear
-            algebra.
     """
 
     num_data: int = eqx.field(static=True)
@@ -59,7 +57,6 @@ class GaussianProcess(eqx.Module):
     mean_function: means.MeanBase
     mean: ArrayLike
     noise: Noise
-    solver: Solver
 
     def __init__(
         self,
@@ -72,10 +69,8 @@ class GaussianProcess(eqx.Module):
         | Callable[[ArrayLike], jax.Array]
         | ArrayLike
         | None = None,
-        solver: Any | None = None,
         mean_value: ArrayLike | None = None,
         covariance_value: Any | None = None,
-        **solver_kwargs: Any,
     ):
         self.kernel = kernel
         self.X = X
@@ -101,14 +96,11 @@ class GaussianProcess(eqx.Module):
             noise = Diagonal(diag=jnp.broadcast_to(diag, self.mean.shape))
         self.noise = noise
 
-        if solver is None:
-            solver = DirectSolver
-        self.solver = solver(
+        self.solver = DirectSolver(
             kernel,
             self.X,
             self.noise,
             covariance=covariance_value,
-            **solver_kwargs,
         )
 
     @property

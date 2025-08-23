@@ -1,12 +1,3 @@
-"""
-The primary model building interface in is via "kernels", which are
-typically constructed as sums and products of objects defined in this
-subpackage, or by subclassing :class:`Kernel` as discussed in the :ref:`kernels`
-tutorial. Many of the most commonly used kernels are described in the
-:ref:`stationary-kernels` section, but this section introduces some of the
-fundamental building blocks.
-"""
-
 __all__ = [
     "Distance",
     "L1Distance",
@@ -30,7 +21,7 @@ __all__ = [
     "SpectralMixture",
 ]
 
-from gp.kernels.base import (
+from base import (
     Conditioned,
     Constant,
     Custom,
@@ -40,8 +31,8 @@ from gp.kernels.base import (
     Product,
     Sum,
 )
-from gp.kernels.distance import Distance, L1Distance, L2Distance
-from gp.kernels.stationary import (
+from distance import Distance, L1Distance, L2Distance
+from stationary import (
     Cosine,
     Exp,
     ExpSineSquared,
