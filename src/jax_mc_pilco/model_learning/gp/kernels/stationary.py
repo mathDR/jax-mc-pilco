@@ -235,23 +235,24 @@ class RationalQuadratic(Stationary):
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
         return (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
 
+
 class SpectralMixture(tinygp.kernels.Kernel):
-    r"""The spectral mixture kernel
+    r"""The [spectral mixture](https://arxiv.org/pdf/1302.4245) kernel.
 
     .. math::
 
-        k(\mathbf{x}_i,\,\mathbf{x}_j) = (1 + r^2 / 2\,\alpha)^{-\alpha}
+        k(\mathbf{x}_i,\,\mathbf{x}_j) = \sum_{q=1}{Q}w_q\prod_{n=1}{N}\exp\(-2\pi^2r_n^2v_q^{(n)})\cos(2\pi r_n\mu_p^{(n)})
 
     where, by default,
 
     .. math::
 
-        r^2 = ||(\mathbf{x}_i - \mathbf{x}_j) / \ell||_2^2
+        r^2 = ||(\mathbf{x}_i - \mathbf{x}_j)||
 
     Args:
         weight: The parameter
-        scale: The parameter :math:`\ell`.
-        alpha: The parameter :math:`\alpha`.
+        scale: The parameter :math:`v`.
+        freq: The parameter :math:`\mu`.
     """
     weight: jax.Array
     scale: jax.Array
