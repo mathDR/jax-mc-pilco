@@ -5,10 +5,10 @@ least) the two parameters:
 
 - ``scale``: A scalar lengthscale for the kernel in the radial distance
   specified by ``distance``, and
-- ``distance``: A :class:`tinygp.kernels.distance.Distance` metric specifying
+- ``distance``: A :class:`kernels.distance.Distance` metric specifying
   how to compute the scalar distance between two input coordinates.
 
-Most of these kernels use the :class:`tinygp.kernels.distance.L1Distance` metric
+Most of these kernels use the :class:`kernels.distance.L1Distance` metric
 by default, and ``scale`` defaults to ``1``.
 """
 
@@ -23,6 +23,7 @@ __all__ = [
     "Cosine",
     "ExpSineSquared",
     "RationalQuadratic",
+    "SpectralMixture",
 ]
 
 
@@ -30,9 +31,9 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from tinygp.helpers import JAXArray
-from tinygp.kernels.base import Kernel
-from tinygp.kernels.distance import Distance, L1Distance, L2Distance
+from helpers import JAXArray
+from kernels.base import Kernel
+from kernels.distance import Distance, L1Distance, L2Distance
 
 
 class Stationary(Kernel):
@@ -40,19 +41,19 @@ class Stationary(Kernel):
 
     Note that a stationary kernel is *always* isotropic. If you need more
     non-isotropic length scales, wrap your kernel in a transform using
-    :class:`tinygp.transforms.Linear` or :class:`tinygp.transforms.Cholesky`.
+    :class:`transforms.Linear` or :class:`transforms.Cholesky`.
 
     Args:
         scale: The length scale, in the same units as ``distance`` for the
             kernel. This must be a scalar.
         distance: An object that implements ``distance`` and
             ``squared_distance`` methods. Typically a subclass of
-            :class:`tinygp.kernels.stationary.Distance`. Each stationary kernel
+            :class:`kernels.stationary.Distance`. Each stationary kernel
             also has a ``default_distance`` property that is used when
             ``distance`` isn't provided.
     """
 
-    scale: JAXArray | float = eqx.field(default_factory=lambda: jnp.ones(()))
+    scale: jax.Array | float = eqx.field(default_factory=lambda: jnp.ones(()))
     distance: Distance = eqx.field(default_factory=L1Distance)
 
 
@@ -233,3 +234,36 @@ class RationalQuadratic(Stationary):
         assert self.alpha is not None
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
         return (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
+
+class SpectralMixture(tinygp.kernels.Kernel):
+    r"""The spectral mixture kernel
+
+    .. math::
+
+        k(\mathbf{x}_i,\,\mathbf{x}_j) = (1 + r^2 / 2\,\alpha)^{-\alpha}
+
+    where, by default,
+
+    .. math::
+
+        r^2 = ||(\mathbf{x}_i - \mathbf{x}_j) / \ell||_2^2
+
+    Args:
+        weight: The parameter
+        scale: The parameter :math:`\ell`.
+        alpha: The parameter :math:`\alpha`.
+    """
+    weight: jax.Array
+    scale: jax.Array
+    freq: jax.Array
+
+    def evaluate(self, X1, X2):
+        tau = jnp.atleast_1d(jnp.abs(X1 - X2))[..., None]
+        return jnp.sum(
+            self.weight
+            * jnp.prod(
+                jnp.exp(-2 * jnp.pi**2 * tau**2 / self.scale**2)
+                * jnp.cos(2 * jnp.pi * self.freq * tau),
+                axis=0,
+            )
+        )
