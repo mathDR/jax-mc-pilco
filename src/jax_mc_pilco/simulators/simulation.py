@@ -3,7 +3,7 @@
 import numpy as np
 import gymnasium as gym
 from jaxtyping import Array, ArrayLike, Int
-from ..controllers import Controller
+from jax_mc_pilco.controllers import Controller
 import jax.random as jr
 from jax import config
 from typing import Tuple

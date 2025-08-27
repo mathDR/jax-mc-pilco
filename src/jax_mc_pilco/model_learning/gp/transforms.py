@@ -17,7 +17,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from jax.scipy import linalg
 
-from kernels.base import Kernel
+from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
 
 
 class Transform(Kernel):

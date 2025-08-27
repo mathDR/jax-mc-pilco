@@ -150,8 +150,8 @@ def fit_controller(  # noqa: PLR0913
                 f"Early stopping due to no improvement over the last {patience} steps"
             )
             break
-        if (epoch % 50) == 0 or (epoch == max_epochs - 1):
-            print(f"{epoch=}, validation_loss={val_loss.item()}, ")
+        if (step % 50) == 0 or (step == max_steps - 1):
+            print(f"{step=}, validation_loss={val_loss.item()}, ")
         step += 1
         iterations_since_improvement += 1
 

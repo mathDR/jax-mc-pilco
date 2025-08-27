@@ -2,18 +2,16 @@
 
 __all__ = ["DynamicalModel"]
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from jax import Array, config, jit, value_and_grad, vmap
 from jax.tree_util import Partial, tree_map
-from gp import kernels, GaussianProcess, transforms
-import gp
 import equinox as eqx
 import jax.numpy as jnp
 
+from jax_mc_pilco.model_learning import GaussianProcess
+from jax_mc_pilco.model_learning.gp.kernels import Kernel, ExpSquared, SpectralMixture
 import jax.random as jr
 from jaxtyping import ArrayLike, PyTree
-
-from jax_mc_pilco.model_learning.kernels import SpectralMixture
 
 import optax as ox
 
@@ -36,6 +34,7 @@ class DynamicalModel(eqx.Module):
 
     # pylint: disable=too-many-instance-attributes
     mean_func: Optional[Callable] = None
+    kernel_func: Kernel
     training_data: ArrayLike
     training_outputs: ArrayLike
     num_outputs: int
@@ -49,7 +48,8 @@ class DynamicalModel(eqx.Module):
         self,
         states: ArrayLike,
         actions: ArrayLike,
-        params: Optional[List[Dict[str, float]]] = None,
+        kernel_func: Kernel,
+        params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
         mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
@@ -62,9 +62,10 @@ class DynamicalModel(eqx.Module):
         self.num_datapoints: int = self.training_data.shape[0]
 
         if mean_func is None:
-            self.mean_func = lambda param, x: 0.0
+            self.mean_func = lambda params, x: 0.0
         else:
             self.mean_func = mean_func
+        self.kernel_func = kernel_func
 
         self.create_models(params)
         self.optimizers: List[ox._src.base.GradientTransformationExtraArgs] = []
@@ -131,27 +132,21 @@ class IMGPR(DynamicalModel):
         self,
         states: ArrayLike,
         actions: ArrayLike,
-        params: Optional[List[Dict[str, float]]] = None,
+        kernel_func: Kernel,
+        params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
         mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__(states, actions, params, mean_func, name)
+        super().__init__(states, actions, kernel_func, params, mean_func, name)
 
-    def build_gp(self, param: ArrayLike) -> gp.GaussianProcess:
+    def build_gp(self, params: ArrayLike) -> GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
-        kernel = jnp.exp(param["log_amp"]) * transforms.Linear(
-            jnp.exp(param["log_scale"]), kernels.ExpSquared()
-        )
-        # kernel = SpectralMixture(
-        #     jnp.exp(param["log_weight"]),
-        #     jnp.exp(param["log_scale"]),
-        #     jnp.exp(param["log_freq"]),
-        # )
+        kernel = self.kernel_func(**params["kernel"])
         return GaussianProcess(
             kernel,
             self.training_data,
-            diag=jnp.square(jnp.exp(param["log_diag"])),
-            mean=Partial(self.mean_func, param),
+            diag=jnp.square(jnp.exp(params["likelihood"]["log_diag"])),
+            mean=Partial(self.mean_func, params["mean"]),
         )
 
     def create_models(
@@ -165,17 +160,22 @@ class IMGPR(DynamicalModel):
         if params is None:
             # params = [
             #     {
-            #         "log_weight": jnp.log(jnp.array([1.0, 1.0])),
-            #         "log_scale": jnp.log(jnp.array([10.0, 20.0])),
-            #         "log_freq": jnp.log(jnp.array([1.0, 0.5])),
-            #         "log_diag": jnp.log(0.1),
+            #         'log_weight': jnp.log(jnp.array([1.0, 1.0])),
+            #         'log_scale': jnp.log(jnp.array([10.0, 20.0])),
+            #         'log_freq': jnp.log(jnp.array([1.0, 0.5])),
+            #         'log_diag': jnp.log(0.1),
             #     }
             # ] * self.num_outputs
             params = [
                 {
-                    "log_amp": -0.1,
-                    "log_scale": 0.0,
-                    "log_diag": -2.5,
+                    "kernel": {
+                        "log_coefficient": -0.1,
+                        "log_scale": 0.0,
+                    },
+                    "mean": [],
+                    "likelihood": {
+                        "log_diag": -2.5,
+                    },
                 }
             ] * self.num_outputs
 

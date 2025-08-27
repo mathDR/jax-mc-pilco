@@ -19,7 +19,7 @@ from jaxtyping import ArrayLike
 import equinox as eqx
 import jax
 
-from kernels.base import Kernel
+from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
 
 
 class MeanBase(eqx.Module):

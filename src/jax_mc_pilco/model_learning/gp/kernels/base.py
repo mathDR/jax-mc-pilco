@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 
 if TYPE_CHECKING:
-    from solvers.solver import Solver
+    from jax_pilco.model_learning.solvers.solver import Solver
 
 Axis = Union[int, Sequence[int]]
 
@@ -134,8 +134,8 @@ class Conditioned(Kernel):
         X: The coordinates of the data.
         scale_tril: The lower Cholesky factor of the base process' kernel
             matrix.
-        kernel: The predictive kerenl; this will generally be the kernel from
-            the kernel used by the original process.
+        kernel: The predictive kernel; this will generally be the kernel
+            used by the original process.
     """
 
     X: ArrayLike

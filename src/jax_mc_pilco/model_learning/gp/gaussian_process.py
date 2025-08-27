@@ -17,14 +17,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import kernels
-import means
+import jax_mc_pilco.model_learning.gp.kernels as kernels
+import jax_mc_pilco.model_learning.gp.means as means
 
-from noise import Diagonal, Noise
-from solver import DirectSolver
+from jax_mc_pilco.model_learning.gp.noise import Diagonal, Noise
+from jax_mc_pilco.model_learning.gp.solver import DirectSolver
 
 if TYPE_CHECKING:
-    from numpyro_support import TinyDistribution
+    from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
 
 class GaussianProcess(eqx.Module):
@@ -44,7 +44,7 @@ class GaussianProcess(eqx.Module):
             this value.
         noise (Noise, optional): Used to implement more expressive observation
             noise models than those supported by just ``diag``. This can be any
-            object that implements the :class:`tinygp.noise.Noise` protocol. If
+            object that implements the :class:`noise.Noise` protocol. If
             this is provided, the ``diag`` parameter will be ignored.
         mean (Callable, optional): A callable or constant mean function that
             will be evaluated with the ``X`` as input: ``mean(X)``
@@ -52,15 +52,16 @@ class GaussianProcess(eqx.Module):
 
     num_data: int = eqx.field(static=True)
     dtype: np.dtype = eqx.field(static=True)
-    kernel: kernels.Kernel
+    kernel: Kernel
     X: ArrayLike
     mean_function: means.MeanBase
     mean: ArrayLike
     noise: Noise
+    solver: DirectSolver
 
     def __init__(
         self,
-        kernel: kernels.Kernel,
+        kernel: Kernel,
         X: ArrayLike,
         *,
         diag: ArrayLike | None = None,
@@ -137,7 +138,7 @@ class GaussianProcess(eqx.Module):
         diag: ArrayLike | None = None,
         noise: Noise | None = None,
         include_mean: bool = True,
-        kernel: kernels.Kernel | None = None,
+        kernel: Kernel | None = None,
     ) -> ConditionResult:
         """Condition the model on observed data and
 
@@ -195,8 +196,8 @@ class GaussianProcess(eqx.Module):
             X_test = self.X
 
         # The conditional GP will also be a GP with the mean an covariance
-        # specified by a :class:`tinygp.means.Conditioned` and
-        # :class:`tinygp.kernels.Conditioned` respectively.
+        # specified by a :class:`means.Conditioned` and
+        # :class:`kernels.Conditioned` respectively.
         gp = GaussianProcess(
             kernels.Conditioned(self.X, self.solver, kernel),
             X_test,
@@ -223,7 +224,7 @@ class GaussianProcess(eqx.Module):
         y: ArrayLike,
         X_test: ArrayLike | None = None,
         *,
-        kernel: kernels.Kernel | None = None,
+        kernel: Kernel | None = None,
         include_mean: bool = True,
         return_var: bool = False,
         return_cov: bool = False,
@@ -283,7 +284,7 @@ class GaussianProcess(eqx.Module):
 
     def numpyro_dist(self, **kwargs: Any) -> TinyDistribution:
         """Get the numpyro MultivariateNormal distribution for this process"""
-        from tinygp.numpyro_support import TinyDistribution
+        from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
         return TinyDistribution(self, **kwargs)
 
@@ -317,7 +318,7 @@ class GaussianProcess(eqx.Module):
         y: ArrayLike,
         X_test: ArrayLike | None,
         include_mean: bool,
-        kernel: kernels.Kernel | None = None,
+        kernel: Kernel | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         alpha = self._get_alpha(y)
         log_prob = self._compute_log_prob(alpha)

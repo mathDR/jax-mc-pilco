@@ -21,7 +21,7 @@ __all__ = [
     "SpectralMixture",
 ]
 
-from base import (
+from jax_mc_pilco.model_learning.gp.kernels.base import (
     Conditioned,
     Constant,
     Custom,
@@ -31,8 +31,12 @@ from base import (
     Product,
     Sum,
 )
-from distance import Distance, L1Distance, L2Distance
-from stationary import (
+from jax_mc_pilco.model_learning.gp.kernels.distance import (
+    Distance,
+    L1Distance,
+    L2Distance,
+)
+from jax_mc_pilco.model_learning.gp.kernels.stationary import (
     Cosine,
     Exp,
     ExpSineSquared,

@@ -14,8 +14,8 @@ from jaxtyping import ArrayLike
 
 import equinox as eqx
 
-from kernels.base import Kernel
-from noise import Noise
+from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
+from jax_mc_pilco.model_learning.gp.noise import Noise
 
 
 class DirectSolver(eqx.Module):

@@ -31,8 +31,12 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from base import Kernel
-from distance import Distance, L1Distance, L2Distance
+from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
+from jax_mc_pilco.model_learning.gp.kernels.distance import (
+    Distance,
+    L1Distance,
+    L2Distance,
+)
 
 
 class Stationary(Kernel):
@@ -43,6 +47,7 @@ class Stationary(Kernel):
     :class:`transforms.Linear` or :class:`transforms.Cholesky`.
 
     Args:
+        coefficient: The coefficient of the kernel.  This must be a scalar
         scale: The length scale, in the same units as ``distance`` for the
             kernel. This must be a scalar.
         distance: An object that implements ``distance`` and
@@ -52,7 +57,10 @@ class Stationary(Kernel):
             ``distance`` isn't provided.
     """
 
-    scale: jax.Array | float = eqx.field(default_factory=lambda: jnp.ones(()))
+    log_coefficient: jax.Array | float = eqx.field(
+        default_factory=lambda: jnp.zeros(())
+    )
+    log_scale: jax.Array | float = eqx.field(default_factory=lambda: jnp.zeros(()))
     distance: Distance = eqx.field(default_factory=L1Distance)
 
 
@@ -74,12 +82,14 @@ class Exp(Stationary):
     """
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        if jnp.ndim(self.scale):
+        if jnp.ndim(self.log_scale):
             raise ValueError(
                 "Only scalar scales are permitted for stationary kernels; use"
                 "transforms.Linear or transforms.Cholesky for more flexiblity"
             )
-        return jnp.exp(-self.distance.distance(X1, X2) / self.scale)
+        return jnp.exp(self.log_coefficient) * jnp.exp(
+            -self.distance.distance(X1, X2) / jnp.exp(self.log_scale)
+        )
 
 
 class ExpSquared(Stationary):
@@ -102,8 +112,10 @@ class ExpSquared(Stationary):
     distance: Distance = eqx.field(default_factory=L2Distance)
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
-        return jnp.exp(-0.5 * r2)
+        r2 = self.distance.squared_distance(X1, X2) / jnp.square(
+            jnp.exp(self.log_scale)
+        )
+        return jnp.exp(self.log_coefficient) * jnp.exp(-0.5 * r2)
 
 
 class Matern32(Stationary):
@@ -124,9 +136,9 @@ class Matern32(Stationary):
     """
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        r = self.distance.distance(X1, X2) / self.scale
+        r = self.distance.distance(X1, X2) / jnp.exp(self.log_scale)
         arg = np.sqrt(3) * r
-        return (1 + arg) * jnp.exp(-arg)
+        return jnp.exp(self.log_coefficient) * j(1 + arg) * jnp.exp(-arg)
 
 
 class Matern52(Stationary):
@@ -148,9 +160,13 @@ class Matern52(Stationary):
     """
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        r = self.distance.distance(X1, X2) / self.scale
+        r = self.distance.distance(X1, X2) / jnp.exp(self.log_scale)
         arg = np.sqrt(5) * r
-        return (1 + arg + jnp.square(arg) / 3) * jnp.exp(-arg)
+        return (
+            jnp.exp(self.log_coefficient)
+            * j(1 + arg + jnp.square(arg) / 3)
+            * jnp.exp(-arg)
+        )
 
 
 class Cosine(Stationary):
@@ -171,8 +187,8 @@ class Cosine(Stationary):
     """
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
-        r = self.distance.distance(X1, X2) / self.scale
-        return jnp.cos(2 * jnp.pi * r)
+        r = self.distance.distance(X1, X2) / jnp.exp(self.log_scale)
+        return jnp.exp(self.log_coefficient) * jjnp.cos(2 * jnp.pi * r)
 
 
 class ExpSineSquared(Stationary):
@@ -201,8 +217,10 @@ class ExpSineSquared(Stationary):
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         assert self.gamma is not None
-        r = self.distance.distance(X1, X2) / self.scale
-        return jnp.exp(-self.gamma * jnp.square(jnp.sin(jnp.pi * r)))
+        r = self.distance.distance(X1, X2) / jnp.exp(self.log_scale)
+        return jnp.exp(self.log_coefficient) * jjnp.exp(
+            -self.gamma * jnp.square(jnp.sin(jnp.pi * r))
+        )
 
 
 class RationalQuadratic(Stationary):
@@ -231,8 +249,13 @@ class RationalQuadratic(Stationary):
 
     def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
         assert self.alpha is not None
-        r2 = self.distance.squared_distance(X1, X2) / jnp.square(self.scale)
-        return (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
+        r2 = self.distance.squared_distance(X1, X2) / jnp.square(
+            jnp.exp(self.log_scale)
+        )
+        return (
+            jnp.exp(self.log_coefficient)
+            * j(1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
+        )
 
 
 class SpectralMixture(Stationary):
@@ -262,7 +285,7 @@ class SpectralMixture(Stationary):
         return jnp.sum(
             self.weight
             * jnp.prod(
-                jnp.exp(-2 * jnp.square(jnp.pi * tau / self.scale))
+                jnp.exp(-2 * jnp.square(jnp.pi * tau / jnp.exp(self.log_scale)))
                 * jnp.cos(2 * jnp.pi * self.freq * tau),
                 axis=0,
             )
