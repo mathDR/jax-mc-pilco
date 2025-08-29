@@ -169,12 +169,12 @@ class IMGPR(DynamicalModel):
             params = [
                 {
                     "kernel": {
-                        "coefficient": jnp.array(0.9),
-                        "log_scale": jnp.array(0.0),
+                        "log_coefficient": -0.1,
+                        "log_scale": 0.0,
                     },
                     "mean": [],
                     "likelihood": {
-                        "log_diag": jnp.array(-2.5),
+                        "log_diag": -2.5,
                     },
                 }
             ] * self.num_outputs
