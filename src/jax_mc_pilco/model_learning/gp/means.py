@@ -1,86 +1,155 @@
-"""
-In ``tinygp``, the Gaussian process mean function can be defined using any
-callable object, but this submodule includes two helper classes for defining
-means. When defining your own mean function, it's important to remember that
-your callable should accept as input a single input coordinate (i.e. not a
-*vector* of coordinates), and return the scalar value of the mean at that
-coordinate. ``tinygp`` will handle all the relevant ``vmap``-ing and
-broadcasting.
-"""
+"""The mean function classes."""
 
 from __future__ import annotations
 
-__all__ = ["Mean", "Conditioned"]
+__all__ = [
+    "Mean",
+    "Custom",
+    "Sum",
+    "Product",
+    "Constant",
+    "Linear",
+]
 
-from abc import abstractmethod
-from typing import Callable
 from jaxtyping import ArrayLike
+
+from typing import TYPE_CHECKING, Any, Callable
 
 import equinox as eqx
 import jax
-
-from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
-
-
-class MeanBase(eqx.Module):
-    @abstractmethod
-    def __call__(self, X: jax.Array) -> jax.Array:
-        raise NotImplementedError
+import jax.numpy as jnp
 
 
-class Mean(MeanBase):
-    """A wrapper for the GP mean which supports a constant value or a callable
-
-    In ``tinygp``, a mean function can be any callable which takes as input a
-    single coordinate and returns the scalar mean at that location.
-
-    Args:
-        value: Either a *scalar* constant, or a callable with the correct
-            signature.
-    """
+class Mean(eqx.Module):
+    """A base class for GP Means"""
 
     value: ArrayLike | None = None
-    func: Callable[[ArrayLike], jax.Array] | None = eqx.field(default=None, static=True)
 
-    def __init__(self, value: ArrayLike | Callable[[ArrayLike], jax.Array]):
-        if callable(value):
-            self.func = value
-        else:
-            self.value = value
+    def __init__(self, value: ArrayLike):
+        self.value = value
 
     def __call__(self, X: ArrayLike) -> jax.Array:
-        if self.value is None:
-            assert self.func is not None
-            return self.func(X)
-        return self.value
+        raise NotImplementedError
+
+    def __add__(self, other: Mean | ArrayLike) -> Mean:
+        if isinstance(other, Mean):
+            return Sum(self, other)
+        return Sum(self, Constant(other))
+
+    def __radd__(self, other: Any) -> Mean:
+        # We'll hit this first branch when using the `sum` function
+        if other == 0:
+            return self
+        if isinstance(other, Mean):
+            return Sum(other, self)
+        return Sum(Constant(other), self)
+
+    def __mul__(self, other: Mean | ArrayLike) -> Mean:
+        if isinstance(other, Mean):
+            return Product(self, other)
+        return Product(self, Constant(other))
+
+    def __rmul__(self, other: Any) -> Mean:
+        if isinstance(other, Mean):
+            return Product(other, self)
+        return Product(Constant(other), self)
 
 
-class Conditioned(MeanBase):
-    r"""The mean of a process conditioned on observed data
+class Constant(Mean):
+    r"""This mean returns the constant
+
+    .. math::
+
+        m(\mathbf{x}) = c
+
+    where :math:`c` is a parameter.
 
     Args:
-        X: The coordinates of the data. alpha: The value :math:`L^-1\,y` where L
-        is ``scale_tril`` and y is the
-            observed data.
-        scale_tril: The lower Cholesky factor of the base process' kernel
-            matrix.
-        kernel: The predictive kerenl; this will generally be the kernel from
-            the kernel used by the original process.
-        include_mean: If ``True``, the predicted values will include the mean
-            function evaluated at ``X_test``.
-        mean_function: The mean function of the base process. Used only if
-            ``include_mean`` is ``True``.
+        c: The parameter :math:`c` in the above equation.
     """
 
-    X: ArrayLike
-    alpha: ArrayLike
-    kernel: Kernel
-    include_mean: bool
-    mean_function: MeanBase | None = None
+    value: jax.Array | float
 
-    def __call__(self, X: ArrayLike) -> jax.Array:
-        Ks = jax.vmap(self.kernel.evaluate, in_axes=(None, 0), out_axes=0)(X, self.X)
-        mu = Ks @ self.alpha
-        if self.include_mean and self.mean_function is not None:
-            mu += self.mean_function(X)
-        return mu
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        if jnp.ndim(self.value) != 0:
+            raise ValueError("The value of a constant mean must be a scalar")
+        return jnp.asarray(self.value)
+
+
+class Linear(Mean):
+    r"""This mean returns the linear result
+
+    .. math::
+
+        m(\mathbf{x}) = value[0] + value[1] * X
+
+    where :math:`value` is a parameter.
+
+    Args:
+        value: The parameter :math:`value` in the above equation.
+    """
+
+    value: jax.Array | float
+
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        if jnp.ndim(self.value) != 2:
+            raise ValueError("The value of a linear mean must have two elements")
+        return jnp.asarray(self.value[0] + self.value[1] * X)
+
+
+class Custom(Mean):
+    """A custom mean class implemented as a callable
+
+    Args:
+        function: A callable with a signature and behavior that matches
+            :func:`Kernel.evaluate`.
+    """
+
+    function: Callable[[Any], Any] = eqx.field(static=True)
+
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        return self.function(X)
+
+
+class Sum(Mean):
+    """A helper to represent the sum of two means"""
+
+    mean1: Mean
+    mean2: Mean
+
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        return self.mean1.evaluate(X) + self.mean2.evaluate(X)
+
+
+class Product(Kernel):
+    """A helper to represent the product of two kernels"""
+
+    mean1: Mean
+    mean2: Mean
+
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        return self.mean1.evaluate(X) * self.mean2.evaluate(X)
+
+
+class Polynomial(Kernel):
+    r"""A polynomial kernel
+
+    .. math::
+
+        k(\mathbf{x}_i,\,\mathbf{x}_j) = [(\mathbf{x}_i / \ell) \cdot
+            (\mathbf{x}_j / \ell) + \sigma^2]^P
+
+    Args:
+        order: The power :math:`P`.
+        scale: The parameter :math:`\ell`.
+        sigma: The parameter :math:`\sigma`.
+    """
+
+    order: ArrayLike | float
+    scale: ArrayLike | float = eqx.field(default_factory=lambda: jnp.ones(()))
+    sigma: ArrayLike | float = eqx.field(default_factory=lambda: jnp.zeros(()))
+
+    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
+        return (
+            (X1 / self.scale) @ (X2 / self.scale) + jnp.square(self.sigma)
+        ) ** self.order

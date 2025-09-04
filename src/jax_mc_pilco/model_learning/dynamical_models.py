@@ -9,7 +9,8 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from jax_mc_pilco.model_learning import GaussianProcess
-from jax_mc_pilco.model_learning.gp.kernels import Kernel, ExpSquared, SpectralMixture
+from jax_mc_pilco.model_learning.gp.means import Mean, Constant
+from jax_mc_pilco.model_learning.gp.kernels import Kernel
 import jax.random as jr
 from jaxtyping import ArrayLike, PyTree
 
@@ -26,6 +27,7 @@ class DynamicalModel(eqx.Module):
     TODO: use a multioutput kernel.
 
     Args:
+        mean (Mean): The mean function, if left blank will default to zero mean
         kernel (Kernel): The kernel function
         data (JAXArray): The input data. This is either state-action pairs
             $(x_t, u_t)$, or (extension) will be observable-action pairs
@@ -33,7 +35,7 @@ class DynamicalModel(eqx.Module):
     """
 
     # pylint: disable=too-many-instance-attributes
-    mean_func: Optional[Callable] = None
+    mean_func: Optional[Mean] = None
     kernel_func: Kernel
     training_data: ArrayLike
     training_outputs: ArrayLike
@@ -50,7 +52,7 @@ class DynamicalModel(eqx.Module):
         actions: ArrayLike,
         kernel_func: Kernel,
         params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Callable] = None,
+        mean_func: Optional[Mean] = None,
         name: Optional[str] = None,
     ) -> None:
         self.training_data, self.training_outputs = self.data_to_gp_input_output(
@@ -62,7 +64,7 @@ class DynamicalModel(eqx.Module):
         self.num_datapoints: int = self.training_data.shape[0]
 
         if mean_func is None:
-            self.mean_func = lambda params, x: 0.0
+            self.mean_func = Constant(0)
         else:
             self.mean_func = mean_func
         self.kernel_func = kernel_func
@@ -134,7 +136,7 @@ class IMGPR(DynamicalModel):
         actions: ArrayLike,
         kernel_func: Kernel,
         params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Callable] = None,
+        mean_func: Optional[Mean] = None,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(states, actions, kernel_func, params, mean_func, name)
@@ -142,18 +144,29 @@ class IMGPR(DynamicalModel):
     def build_gp(self, params: ArrayLike) -> GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
         kernel = self.kernel_func(**params["kernel"])
+        mean = self.mean_func(**params["mean"])
         return GaussianProcess(
             kernel,
             self.training_data,
             diag=jnp.square(jnp.exp(params["likelihood"]["log_diag"])),
-            mean=Partial(self.mean_func, params["mean"]),
+            mean=mean,
         )
 
     def create_models(
         self,
-        params: Optional[List[Dict[str, float]]] = None,
+        params: List[Dict[str, float]] = None,
     ) -> None:
-        """Create GP models using params list"""
+        """Create the Gaussian Process models utilizing parameters.
+
+        Args:
+            params (List[Dict]): The parameters of the GP model.
+            Each element of the list is a dictionary containing the parameters of the GP
+            corresponding to the respective indexed output.  There should be keys:
+              "kernel" - denoting the parameters of the GP kernel
+              " mean" - denoting the parameters of the GP mean
+              " likelihood" -- denoting the parameters of the likelihood
+                (usually the log sqrt of the observation noise)
+        """
 
         self.models = []
 
