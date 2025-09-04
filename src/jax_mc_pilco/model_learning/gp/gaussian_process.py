@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["GaussianProcess"]
+__all__ = ["GaussianProcess", "SparseGaussianProcess"]
 
 from collections.abc import Sequence
 from functools import partial
@@ -8,9 +8,12 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Dict
     NamedTuple,
+    Tuple,
+    Union
 )
-from jaxtyping import ArrayLike
+from jaxtyping import ArrayLike, Float
 
 import equinox as eqx
 import jax
@@ -46,16 +49,14 @@ class GaussianProcess(eqx.Module):
             noise models than those supported by just ``diag``. This can be any
             object that implements the :class:`noise.Noise` protocol. If
             this is provided, the ``diag`` parameter will be ignored.
-        mean (Callable, optional): A callable or constant mean function that
-            will be evaluated with the ``X`` as input: ``mean(X)``
+        mean (Mean): The mean function called with ``X`` as input: ``mean(X)``
     """
 
     num_data: int = eqx.field(static=True)
     dtype: np.dtype = eqx.field(static=True)
     kernel: Kernel
     X: ArrayLike
-    mean_function: means.MeanBase
-    mean: ArrayLike
+    mean: means.Mean
     noise: Noise
     solver: DirectSolver
 
@@ -66,31 +67,21 @@ class GaussianProcess(eqx.Module):
         *,
         diag: ArrayLike | None = None,
         noise: Noise | None = None,
-        mean: means.MeanBase
-        | Callable[[ArrayLike], jax.Array]
-        | ArrayLike
-        | None = None,
-        mean_value: ArrayLike | None = None,
+        mean: means.Mean | None = None,
         covariance_value: Any | None = None,
     ):
         self.kernel = kernel
         self.X = X
 
-        if isinstance(mean, means.MeanBase) or isinstance(mean, Callable):
-            self.mean_function = mean
-        elif mean is None:
-            self.mean_function = means.Mean(jnp.zeros(()))
+        if mean:
+            self.mean = mean
         else:
-            self.mean_function = means.Mean(mean)
-        if mean_value is None:
-            mean_value = jax.vmap(self.mean_function)(self.X)
+            self.mean = means.ConstantMean(0)
+
         self.num_data = mean_value.shape[0]
         self.dtype = mean_value.dtype
         self.mean = mean_value
-        if self.mean.ndim != 1:
-            raise ValueError(
-                "Invalid mean shape: " f"expected ndim = 1, got ndim={self.mean.ndim}"
-            )
+
 
         if noise is None:
             diag = _default_diag(self.mean) if diag is None else diag
@@ -106,7 +97,7 @@ class GaussianProcess(eqx.Module):
 
     @property
     def loc(self) -> jax.Array:
-        return self.mean
+        return self.mean(self.X)
 
     @property
     def variance(self) -> jax.Array:
@@ -352,6 +343,234 @@ class GaussianProcess(eqx.Module):
                 mean_value += jax.vmap(self.mean_function)(X_test)
 
         return alpha, log_prob, mean_value
+
+
+class SparseGaussianProcess(eqx.Module):
+    """An interface for designing a Sparse Gaussian Process regression model
+
+    Args:
+      kernel (Kernel): The kernel function
+      X (ArrayLike): The input coordinates. This can be any PyTree that is
+        compatible with ``kernel`` where the zeroth dimension is ``N_data``,
+        the size of the data set.
+      y (ArrayLike): The observed data. This should have the shape
+        ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
+        data provided when instantiating this object.
+      num_inducing_points (int): the number of inducing points.
+      mean (Mean): The mean function that will be evaluated with the ``X``
+       as input: ``mean(X)``
+      params: the parameters of the kernel, mean, likelihood and inducing point locations.
+    """
+
+    num_data: int = eqx.field(static=True)
+    num_inducing_points: int = eqx.field(static=True)
+    dtype: jnp.dtype = eqx.field(static=True)
+    kernel: Kernel
+    X: ArrayLike
+    y: ArrayLike
+    mean: Mean
+    params: ArrayLike
+
+    def __init__(
+        self,
+        kernel: Kernel,
+        X: ArrayLike,
+        y: ArrayLike,
+        num_inducing_points: int,
+        params: ArrayLike,
+        *,
+        mean: Mean | None = None,
+    ):
+        self.kernel = kernel
+        self.mean = mean
+        self.X = X
+        self.y = y
+
+        self.num_data = self.X.shape[0]
+        self.dtype = self.X.dtype
+        self.num_inducing_points = num_inducing_points
+
+        self.params = params
+
+    def jitter(self, d, value=1e-6):
+        return jnp.eye(d) * value
+
+    def collapsed_elbo(
+        self,
+        params: Dict[str, float],
+    ) -> Union[float, Float[jax.Array, ""]]:
+        log_noise = params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        z = params["inducing_point_locations"]
+        kernel = self.kernel(**params["kernel"])
+
+        K_zz = kernel(z, z) + self.jitter(z.shape[0])
+        K_zx = kernel(z, self.X)
+        Kxx_diag = jax.vmap(kernel, in_axes=(0, 0))(self.X, self.X)
+        # mu = mean(**params['mean'])(self.X)
+        mu = 0.0
+
+        Lz = jnp.linalg.cholesky(K_zz)  # m x m
+
+        A = jsp.linalg.solve_triangular(Lz, K_zx, lower=True) / noise  # m x n
+        AAT = jnp.matmul(A, A.T)  # m x m
+        B = jnp.eye(z.shape[0]) + AAT  # m x m
+        LB = jnp.linalg.cholesky(B)  # m x m
+
+        log_det_B = 2.0 * jnp.sum(jnp.log(jnp.diagonal(LB)))
+        diff = self.y - mu
+
+        L_inv_A_diff = jsp.linalg.solve_triangular(LB, jnp.matmul(A, diff), lower=True)
+        quad = (
+            jnp.sum(jnp.square(diff)) - jnp.sum(jnp.square(L_inv_A_diff))
+        ) / sq_noise
+
+        two_log_prob = (
+            -self.num_data * jnp.log(2.0 * jnp.pi * sq_noise) - log_det_B - quad
+        )
+        two_trace = jnp.sum(Kxx_diag) / sq_noise - jnp.trace(AAT)
+
+        return 0.5 * (two_log_prob - two_trace).squeeze()
+
+    def fit(
+        self,
+        *,
+        max_iters: int = 500,
+        max_linesearch_steps: int = 32,
+        gtol: float = 1e-5,
+    ) -> Tuple[Float, jax.Array]:
+        r"""Maximize the collapsed expected lower bound (ELBO).
+
+        Uses Optax's LBFGS implementation and a jax.lax.while loop.
+
+        Args:
+          max_iters (int): The maximum number of optimisation steps to run. Defaults
+            to 500.
+          max_linesearch_steps (int): The maximum number of linesearch steps to use
+            for finding the stepsize.Defaults to 32.
+          gtol (float): Terminate the optimisation if the L2 norm of the gradient is
+            below this threshold. Defaults to 1e-8.
+
+        Returns:
+          A tuple comprising the optimised model and final loss.
+        """
+        vals, static = eqx.partition(self.params, eqx.is_array)
+
+        def loss(vals: Dict) -> Float:
+            params = eqx.combine(vals, static)
+            return -self.collapsed_elbo(params)
+
+        # Initialise optimiser
+        optim = optax.lbfgs(
+            linesearch=optax.scale_by_zoom_linesearch(
+                max_linesearch_steps=max_linesearch_steps,
+                initial_guess_strategy="one",
+            )
+        )
+
+        opt_state = optim.init(params)
+        loss_value_and_grad = optax.value_and_grad_from_state(loss)
+
+        # Optimisation step.
+        def step(carry):
+            vals, opt_state = carry
+            # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
+            # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
+            loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
+            updates, opt_state = optim.update(
+                loss_gradient,
+                opt_state,
+                vals,
+                value=loss_val,
+                grad=loss_gradient,
+                value_fn=loss,
+            )
+            vals = optax.apply_updates(vals, updates)
+
+            return vals, opt_state
+
+        def continue_fn(carry):
+            _, opt_state = carry
+            n = optax.tree_utils.tree_get(opt_state, "count")
+            g = optax.tree_utils.tree_get(opt_state, "grad")
+            g_l2_norm = optax.tree_utils.tree_norm(g)
+            return (n == 0) | ((n < max_iters) & (g_l2_norm >= gtol))
+
+        # Optimisation loop
+        opt_vals, opt_state = jax.lax.while_loop(
+            continue_fn,
+            step,
+            (vals, opt_state),
+        )
+        final_loss = optax.tree_utils.tree_get(opt_state, "value")
+        self.params = eqx.combine(opt_vals, static) # Do I need to do a eqx.tree_at here?
+
+    def predict(
+        self,
+        X_test: ArrayLike | None = None,
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
+        """Predict the GP model at new test points conditioned on observed data
+
+        Args:
+          X_test (ArrayLike, optional): The coordinates where the prediction
+            should be evaluated. This should have a data type compatible
+            with the ``X`` data provided when instantiating this object. If
+            it is not provided, ``X`` will be used by default, so the
+            predictions will be made.
+
+        Returns:
+          The mean and covariance of the predictive model evaluated at ``X_test``, with shape
+          ``(N_test,)`` and ``(N_test, N_test)`` where ``N_test`` is the zeroth dimension of
+          ``X_test``.
+        """
+
+        # Compute mu and Covariance
+        log_noise = self.params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        z = params["inducing_point_locations"]
+        kernel = self.kernel(**self.params["kernel"])
+        mean = self.mean(**self.params['mean'])
+        mu = mean(self.X)
+
+        K_zz = kernel(z, z) + self.jitter(z.shape[0])
+        L_z = jnp.linalg.cholesky(K_zz)
+
+        K_zx = kernel(z, self.X)
+
+        Lz_inv_Kzx = jsp.linalg.cho_solve((L_z, True), K_zx)
+
+        A = Lz_inv_Kzx / noise
+        AAT = jnp.matmul(A, A.T)
+        L = jnp.linalg.cholesky(AAT + jnp.eye(self.num_inducing_points))
+
+        diff = self.y - mu
+
+        Lz_inv_Kzx_diff = jsp.linalg.cho_solve((L, True), jnp.matmul(Lz_inv_Kzx, diff))
+
+        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z, True), Lz_inv_Kzx_diff)
+
+        K_tt = kernel(X_test, X_test)
+        K_zt = kernel(z, X_test)
+
+        mu_t = mean(X_test)
+
+        Lz_inv_Kzt = jsp.linalg.cho_solve((L_z, True), K_zt)
+        L_inv_Lz_inv_Kzt = jsp.linalg.solve_triangular(L, Lz_inv_Kzt, lower=True)
+
+        f_q = mu_t + jnp.matmul(K_zt.T / sq_noise, Kzz_inv_Kzx_diff)
+
+        f_q_cov = (
+            K_tt
+            - jnp.matmul(Lz_inv_Kzt.T, Lz_inv_Kzt)
+            + jnp.matmul(L_inv_Lz_inv_Kzt.T, L_inv_Lz_inv_Kzt)
+            + self.jitter(X_test.shape[0])
+        )
+
+        return jnp.atleast_1d(f_q.squeeze()), f_q_cov
 
 
 class ConditionResult(NamedTuple):
