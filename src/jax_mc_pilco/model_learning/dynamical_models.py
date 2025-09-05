@@ -1,6 +1,6 @@
 """ The main model class. """
 
-__all__ = ["DynamicalModel"]
+__all__ = ["DynamicalModel", "IMGPR"]
 
 from typing import Callable, Dict, List, Optional, Tuple, Union
 from jax import Array, config, jit, value_and_grad, vmap
@@ -8,23 +8,17 @@ from jax.tree_util import Partial, tree_map
 import equinox as eqx
 import jax.numpy as jnp
 
-from jax_mc_pilco.model_learning import GaussianProcess
-from jax_mc_pilco.model_learning.gp.means import Mean, Constant
-from jax_mc_pilco.model_learning.gp.kernels import Kernel
+from model_learning import ConstantMean, GaussianProcess, Kernel, Mean
 import jax.random as jr
-from jaxtyping import ArrayLike, PyTree
+from jaxtyping import ArrayLike, Int, PyTree
 
-import optax as ox
+import optax
 
 config.update("jax_enable_x64", True)
 
 
 class DynamicalModel(eqx.Module):
-    """The forward model of the system dynamics.
-
-    Currently is a Multiple Gaussian Process regression with an independent GP for
-    every output dimension but
-    TODO: use a multioutput kernel.
+    """The base class for forward model of the system dynamics.
 
     Args:
         mean (Mean): The mean function, if left blank will default to zero mean
@@ -35,14 +29,14 @@ class DynamicalModel(eqx.Module):
     """
 
     # pylint: disable=too-many-instance-attributes
-    mean_func: Optional[Mean] = None
-    kernel_func: Kernel
+    mean: Mean | List[Mean] | None = None
+    kernel: Kernel | List[Kernel]
     training_data: ArrayLike
     training_outputs: ArrayLike
-    num_outputs: int
-    input_dimension: int
-    num_datapoints: int
-    optimizers: List[ox._src.base.GradientTransformationExtraArgs]
+    num_outputs: Int
+    input_dimension: Int
+    num_datapoints: Int
+    optimizers: List[optax._src.base.GradientTransformationExtraArgs]
     models: List[ArrayLike]
     name: Optional[str]
 
@@ -52,7 +46,7 @@ class DynamicalModel(eqx.Module):
         actions: ArrayLike,
         kernel_func: Kernel,
         params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Mean] = None,
+        mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
         self.training_data, self.training_outputs = self.data_to_gp_input_output(
@@ -64,13 +58,13 @@ class DynamicalModel(eqx.Module):
         self.num_datapoints: int = self.training_data.shape[0]
 
         if mean_func is None:
-            self.mean_func = Constant(0)
+            self.mean_func = lambda params, x: 0.0
         else:
             self.mean_func = mean_func
         self.kernel_func = kernel_func
 
         self.create_models(params)
-        self.optimizers: List[ox._src.base.GradientTransformationExtraArgs] = []
+        self.optimizers: List[optax._src.base.GradientTransformationExtraArgs] = []
 
         self.name = name
 
@@ -136,7 +130,7 @@ class IMGPR(DynamicalModel):
         actions: ArrayLike,
         kernel_func: Kernel,
         params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Mean] = None,
+        mean_func: Optional[Callable] = None,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(states, actions, kernel_func, params, mean_func, name)
@@ -144,29 +138,18 @@ class IMGPR(DynamicalModel):
     def build_gp(self, params: ArrayLike) -> GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
         kernel = self.kernel_func(**params["kernel"])
-        mean = self.mean_func(**params["mean"])
         return GaussianProcess(
             kernel,
             self.training_data,
             diag=jnp.square(jnp.exp(params["likelihood"]["log_diag"])),
-            mean=mean,
+            mean=Partial(self.mean_func, params["mean"]),
         )
 
     def create_models(
         self,
-        params: List[Dict[str, float]] = None,
+        params: Optional[List[Dict[str, float]]] = None,
     ) -> None:
-        """Create the Gaussian Process models utilizing parameters.
-
-        Args:
-            params (List[Dict]): The parameters of the GP model.
-            Each element of the list is a dictionary containing the parameters of the GP
-            corresponding to the respective indexed output.  There should be keys:
-              "kernel" - denoting the parameters of the GP kernel
-              " mean" - denoting the parameters of the GP mean
-              " likelihood" -- denoting the parameters of the likelihood
-                (usually the log sqrt of the observation noise)
-        """
+        """Create GP models using params list"""
 
         self.models = []
 
@@ -204,8 +187,8 @@ class IMGPR(DynamicalModel):
         if not self.optimizers:  # More Pythonic way to check if list is empty
             for i in range(self.num_outputs):
                 self.optimizers.append(
-                    ox.adam(
-                        learning_rate=ox.linear_schedule(
+                    optax.adam(
+                        learning_rate=optax.linear_schedule(
                             init_value=1e-1, end_value=1e-6, transition_steps=100
                         )
                     )
@@ -226,7 +209,7 @@ class IMGPR(DynamicalModel):
             ):
                 loss_value, grads = value_and_grad(loss)(params)
                 updates, opt_state = self.optimizers[i].update(grads, opt_state, params)
-                params = ox.apply_updates(params, updates)
+                params = optax.apply_updates(params, updates)
                 return params, opt_state, loss_value
 
             patience_count = 0

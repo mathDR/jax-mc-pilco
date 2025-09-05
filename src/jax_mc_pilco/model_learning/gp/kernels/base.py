@@ -28,6 +28,14 @@ if TYPE_CHECKING:
 Axis = Union[int, Sequence[int]]
 
 
+def softplus(X):
+    return jnp.log(1 + jnp.exp(X))
+
+
+def softplus_inverse(X):
+    return jnp.log(jnp.exp(X) - 1)
+
+
 class Kernel(eqx.Module):
     """The base class for all kernel implementations
 
