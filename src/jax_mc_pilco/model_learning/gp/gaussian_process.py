@@ -297,7 +297,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
         K_tt = kernel(X_test, X_test)
         K_zt = kernel(z, X_test)
 
-        mu_t = jnp.atleast_2d(mean(X_test)).T
+        mu_t = mean(X_test)
 
         Lz_inv_Kzt = jsp.linalg.cho_solve((L_z, True), K_zt)
         L_inv_Lz_inv_Kzt = jsp.linalg.solve_triangular(L_AAT, Lz_inv_Kzt, lower=True)

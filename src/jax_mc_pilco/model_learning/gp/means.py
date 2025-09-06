@@ -47,7 +47,7 @@ class Mean(eqx.Module):
         raise NotImplementedError
 
     def __call__(self, X: ArrayLike | None = None) -> jax.Array:
-        m = jax.vmap(self.evaluate)(X)
+        m = jax.vmap(self.evaluate, in_axes=0)(X)
         return m
 
     def __add__(self, other: Mean | ArrayLike) -> Mean:
@@ -84,7 +84,7 @@ class ZeroMean(Mean):
     """
 
     def evaluate(self, X: ArrayLike) -> jax.Array:
-        return jnp.asarray(0.0)
+        return jnp.zeros_like(X)
 
 
 class ConstantMean(Mean):
@@ -105,7 +105,7 @@ class ConstantMean(Mean):
     def evaluate(self, X: ArrayLike) -> jax.Array:
         if jnp.ndim(self.value) != 0:
             raise ValueError("The value of a constant mean must be a scalar")
-        return jnp.asarray(self.value)
+        return self.value * jnp.ones_like(X)
 
 
 class LinearMean(Mean):
