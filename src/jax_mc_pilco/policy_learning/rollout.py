@@ -2,8 +2,7 @@
 
 import copy
 import equinox as eqx
-import optax as ox
-import numpy as np
+import optax
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, ArrayLike, Float, Int, PyTree
@@ -21,9 +20,8 @@ def fit_controller(  # noqa: PLR0913
     timesteps: ArrayLike,
     gp_model: eqx.Module,
     obj_func: Callable,
-    optim: ox.GradientTransformation,
+    optim: optax.GradientTransformation,
     key: ArrayLike = jr.PRNGKey(42),
-    num_iters,
     max_steps: Int = 100,
     patience: Int = 7,
     unroll: Int = 5,
@@ -70,7 +68,7 @@ def fit_controller(  # noqa: PLR0913
             actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
 
             key, subkey = jr.split(key)
-            samples = model.get_samples(key, samples, actions, 1)
+            samples = model.get_samples(subkey, samples, actions, 1)
             cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, actions))))
             return (policy_params, key, samples, total_cost + cost), cost
 
@@ -109,9 +107,6 @@ def fit_controller(  # noqa: PLR0913
 
     opt_state = optim.init(eqx.filter(policy, eqx.is_array))
 
-    # Mini-batch random keys to scan over.
-    iter_keys = jr.split(key, num_iters)
-
     # Optimisation step.
     @eqx.filter_jit
     def make_step(
@@ -129,7 +124,7 @@ def fit_controller(  # noqa: PLR0913
 
     val_losses = []
     step = 0
-    best_loss = np.inf
+    best_loss = jnp.inf
     iterations_since_improvement = 0
 
     while step < max_steps:

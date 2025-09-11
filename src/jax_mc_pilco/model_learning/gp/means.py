@@ -83,8 +83,8 @@ class ZeroMean(Mean):
 
     """
 
-    def evaluate(self, X: ArrayLike) -> jax.Array:
-        return jnp.zeros_like(X)
+    def evaluate(self, X: ArrayLike) -> Float:
+        return 0.0
 
 
 class ConstantMean(Mean):
@@ -100,12 +100,12 @@ class ConstantMean(Mean):
         c: The parameter :math:`c` in the above equation.
     """
 
-    value: jax.Array | float
+    value: jax.Array | Float
 
     def evaluate(self, X: ArrayLike) -> jax.Array:
         if jnp.ndim(self.value) != 0:
             raise ValueError("The value of a constant mean must be a scalar")
-        return self.value * jnp.ones_like(X)
+        return self.value
 
 
 class LinearMean(Mean):

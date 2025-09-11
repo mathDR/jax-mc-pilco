@@ -2,17 +2,16 @@
 
 __all__ = ["DynamicalModel", "IMGPR"]
 
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Tuple, Union
 from jax import Array, config, jit, value_and_grad, vmap
 from jax.tree_util import Partial, tree_map
 import equinox as eqx
 import jax.numpy as jnp
 
-from model_learning import ConstantMean, GaussianProcess, Kernel, Mean
+from jax_mc_pilco.model_learning.gp.gaussian_process import gp_fit, GaussianProcess
+from jax_mc_pilco.model_learning.gp import Kernel, Mean, ZeroMean
 import jax.random as jr
-from jaxtyping import ArrayLike, Int, PyTree
-
-import optax
+from jaxtyping import ArrayLike, Bool, Float, Int, PyTree
 
 config.update("jax_enable_x64", True)
 
@@ -29,42 +28,42 @@ class DynamicalModel(eqx.Module):
     """
 
     # pylint: disable=too-many-instance-attributes
-    mean: Mean | List[Mean] | None = None
+    mean: Mean | List[Mean] | None
     kernel: Kernel | List[Kernel]
     training_data: ArrayLike
     training_outputs: ArrayLike
     num_outputs: Int
     input_dimension: Int
     num_datapoints: Int
-    optimizers: List[optax._src.base.GradientTransformationExtraArgs]
     models: List[ArrayLike]
-    name: Optional[str]
+    name: str | None
 
     def __init__(
         self,
         states: ArrayLike,
         actions: ArrayLike,
         kernel_func: Kernel,
-        params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Callable] = None,
-        name: Optional[str] = None,
+        params: List[Dict[str, Union[Dict[str, Float], Float]]],
+        *,
+        mean_func: Mean | None = None,
+        name: str | None = None,
     ) -> None:
         self.training_data, self.training_outputs = self.data_to_gp_input_output(
             states, actions
         )
 
-        self.num_outputs: int = self.training_outputs.shape[1]
-        self.input_dimension: int = self.training_data.shape[1]
-        self.num_datapoints: int = self.training_data.shape[0]
+        self.num_outputs: Int = self.training_outputs.shape[1]
+        self.input_dimension: Int = self.training_data.shape[1]
+        self.num_datapoints: Int = self.training_data.shape[0]
 
         if mean_func is None:
-            self.mean_func = lambda params, x: 0.0
+            self.mean = ZeroMean
         else:
-            self.mean_func = mean_func
-        self.kernel_func = kernel_func
+            self.mean = mean_func
+
+        self.kernel = kernel_func
 
         self.create_models(params)
-        self.optimizers: List[optax._src.base.GradientTransformationExtraArgs] = []
 
         self.name = name
 
@@ -92,12 +91,12 @@ class DynamicalModel(eqx.Module):
 
     def create_models(
         self,
-        params: Optional[List[Dict[str, float]]] = None,
+        params: List[Dict[str, float]],
     ) -> None:
         """Create the models for each output dimension."""
         raise NotImplementedError()
 
-    def optimize(self, maxiter: int = 1000, key: Optional[ArrayLike] = None):
+    def optimize(self, maxiter: int = 1000, key: ArrayLike | None = None):
         """Minimize negative marginal likelihood for the model over the hyperparameters."""
         raise NotImplementedError()
 
@@ -129,104 +128,45 @@ class IMGPR(DynamicalModel):
         states: ArrayLike,
         actions: ArrayLike,
         kernel_func: Kernel,
-        params: Optional[List[Dict[str, Union[Dict[str, float], float]]]] = None,
-        mean_func: Optional[Callable] = None,
-        name: Optional[str] = None,
+        params: List[Dict[str, Union[Dict[str, float], float]]],
+        *,
+        mean_func: Callable | None = None,
+        name: str | None = None,
     ) -> None:
-        super().__init__(states, actions, kernel_func, params, mean_func, name)
+        super().__init__(states, actions, kernel_func, params, mean_func=mean_func, name=name)
 
-    def build_gp(self, params: ArrayLike) -> GaussianProcess:
+    def build_gp(self, y: ArrayLike, params: ArrayLike, optimized: Bool) -> GaussianProcess:
         """Constructs a GP from the parameter list.  Should figure out how to parameterize the kernel."""
-        kernel = self.kernel_func(**params["kernel"])
         return GaussianProcess(
-            kernel,
+            self.kernel,
             self.training_data,
-            diag=jnp.square(jnp.exp(params["likelihood"]["log_diag"])),
-            mean=Partial(self.mean_func, params["mean"]),
+            y,
+            params,
+            mean=self.mean,
+            optimized=optimized,
         )
 
     def create_models(
         self,
-        params: Optional[List[Dict[str, float]]] = None,
+        params: List[Dict[str, Float]],
     ) -> None:
         """Create GP models using params list"""
 
         self.models = []
 
-        if params is None:
-            # params = [
-            #     {
-            #         'log_weight': jnp.log(jnp.array([1.0, 1.0])),
-            #         'log_scale': jnp.log(jnp.array([10.0, 20.0])),
-            #         'log_freq': jnp.log(jnp.array([1.0, 0.5])),
-            #         'log_diag': jnp.log(0.1),
-            #     }
-            # ] * self.num_outputs
-            params = [
-                {
-                    "kernel": {
-                        "log_coefficient": -0.1,
-                        "log_scale": 0.0,
-                    },
-                    "mean": [],
-                    "likelihood": {
-                        "log_diag": -2.5,
-                    },
-                }
-            ] * self.num_outputs
-
         for i in range(self.num_outputs):
             self.models.append(params[i])
 
-    def optimize(self, maxiter: int = 1000, key: Optional[ArrayLike] = None):
+    def optimize(self, maxiter: int = 1000, key: ArrayLike | None = None):
         """Optimize the hyperparameters of the models using MAP nlml."""
 
         if key is None:
             key = jr.key(123)
 
-        if not self.optimizers:  # More Pythonic way to check if list is empty
-            for i in range(self.num_outputs):
-                self.optimizers.append(
-                    optax.adam(
-                        learning_rate=optax.linear_schedule(
-                            init_value=1e-1, end_value=1e-6, transition_steps=100
-                        )
-                    )
-                )
-
-        patience = 3
         for i in range(self.num_outputs):  # Iterate with index
+            self.models[i] = gp_fit(self.build_gp(self.training_outputs[:,i], self.models[i], optimized=False)).params  # Update the model with the optimized posterior.
 
-            @jit
-            def loss(params):
-                gp = self.build_gp(params)
-                return -gp.log_probability(self.training_outputs[:, i])
-
-            @jit
-            def make_step(
-                params: ArrayLike,
-                opt_state: PyTree,
-            ):
-                loss_value, grads = value_and_grad(loss)(params)
-                updates, opt_state = self.optimizers[i].update(grads, opt_state, params)
-                params = optax.apply_updates(params, updates)
-                return params, opt_state, loss_value
-
-            patience_count = 0
-            params = tree_map(jnp.asarray, self.models[i])
-            opt_state = self.optimizers[i].init(params)
-            best_val = float("inf")
-            for _ in range(maxiter):
-                params, opt_state, train_loss = make_step(params, opt_state)
-                if train_loss < best_val:
-                    best_val = train_loss
-                    patience_count = 0
-                else:
-                    patience_count += 1
-                if patience_count > patience:
-                    break
-            self.models[i] = params  # Update the model with the optimized posterior.
-
+    @jax.jit
     def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
         """
         Return the gp ouputs (mean and variance) for each output dimension for each test input
@@ -234,7 +174,7 @@ class IMGPR(DynamicalModel):
         Args:
         test_inputs (List[JAXArray]): A list containing the test inputs.
 
-        returns a tuple containing the means and covariances of the test inputs.
+        returns a tuple containing the means and covariances of the test inputs. This assumes that the gps have been fit!
 
         Because the GP models the differences in the states, we must add back the state to get
         the state mean (the variance is the same).
@@ -243,19 +183,19 @@ class IMGPR(DynamicalModel):
         predictive_means = []
         predictive_vars = []
         for i in range(self.num_outputs):
-            gp = self.build_gp(self.models[i])
-            cond_gp = gp.condition(self.training_outputs[:, i], test_inputs).gp
-            predictive_means.append(cond_gp.loc)
-            predictive_vars.append(cond_gp.variance)
-        predictive_moments = jnp.stack(
+            gp = self.build_gp(self.training_outputs[:,i],self.models[i],optimized=True)
+            mu, cov = gp.predict(test_inputs)
+            predictive_means.append(mu+test_inputs[:,i])
+            predictive_vars.append(cov)
+        predictive_moments = jnp.dstack(
             (
-                jnp.array(predictive_means).T + test_inputs[:, : self.num_outputs],
-                jnp.array(predictive_vars).T,
+                jnp.array(predictive_means),
+                jnp.array(predictive_vars),
             ),
-            axis=2,
         )
         return predictive_moments
 
+    @jax.jit
     def get_samples(
         self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: int
     ) -> Array:
@@ -273,5 +213,5 @@ class IMGPR(DynamicalModel):
                 predictive_moments[:, :, 0],
                 vmap(jnp.diag)(predictive_moments[:, :, 1]),
                 num_samples,
-            )
+            ).T
         )

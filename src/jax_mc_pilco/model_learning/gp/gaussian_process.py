@@ -17,18 +17,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import warnings
 import jax.scipy as jsp
 
 from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
 from jax_mc_pilco.model_learning.gp.means import ZeroMean, Mean
 
-from jax_mc_pilco.model_learning.gp.solver import DirectSolver
-
 if TYPE_CHECKING:
     from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
 
-def softplus(X):
+def softplus(X: ArrayLike)->jax.Array:
     return jnp.log(1 + jnp.exp(X))
 
 
@@ -175,8 +174,10 @@ class SparseVariationalGaussianProcess(eqx.Module):
 
         self.params = params
         self.optimized = optimized
-
-        self.cached_choleskys = cached_choleskys
+        if cached_choleskys is None:
+            self.cached_choleksys = self.compute_cached_choleskys(params)
+        else:
+            self.cached_choleskys = cached_choleskys
 
     def jitter(self, d, value=1e-6):
         return jnp.eye(d) * value
@@ -256,6 +257,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
 
         return (L_z, L_AAT, Kzz_inv_Kzx_diff)
 
+    @jax.jit
     def predict(
         self,
         X_test: ArrayLike | None = None,
@@ -264,8 +266,6 @@ class SparseVariationalGaussianProcess(eqx.Module):
            This method caches the intermediate
 
         Args:
-            params (ArrayLike): The optimized parameters for the kernel, likelihood,
-                mean and locations of the inducing points.
             X_test (ArrayLike, optional): The coordinates where the prediction
                 should be evaluated. This should have a data type compatible
                 with the ``X`` data provided when instantiating this object. If
@@ -453,7 +453,13 @@ class GaussianProcess(eqx.Module):
         self.params = params
         self.optimized = optimized
 
-        self.cached_choleskys = cached_choleskys
+        if cached_choleskys is None:
+            self.cached_choleskys = self.compute_cached_choleskys(self.params)
+        else:
+            self.cached_choleskys = cached_choleskys
+
+    def jitter(self, d, value=1e-6):
+        return jnp.eye(d) * value
 
     def log_probability(self, params: Dict) -> jax.Array:
         """Compute the log probability of this multivariate normal
@@ -473,7 +479,7 @@ class GaussianProcess(eqx.Module):
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + sq_noise
+        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
 
         alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
@@ -483,8 +489,7 @@ class GaussianProcess(eqx.Module):
         log_likelihood = -0.5 * jnp.dot(self.y.T, S2)
         log_likelihood -= jnp.log(jnp.diag(L_xx)).sum()
         log_likelihood -= 0.5 * self.num_data * jnp.log(2.0 * jnp.pi)
-        # the log likelihood is sum-up across the outputs
-        return log_likelihood.sum(axis=-1)
+        return jnp.squeeze(log_likelihood)
 
     def compute_cached_choleskys(self, params: Dict) -> jax.Array:
         """Compute the cholesky of the covariance as well as the alpha value.
@@ -503,9 +508,9 @@ class GaussianProcess(eqx.Module):
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + sq_noise
-        L_xx = jsp.linalg.cholesky(covariance, lower=True)
+        covariance = kernel(self.X, self.X) + self.jitter(self.num_data,value=sq_noise)
 
+        L_xx = jsp.linalg.cholesky(covariance, lower=True)
         alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
 
         return (L_xx, alpha)
@@ -543,75 +548,13 @@ class GaussianProcess(eqx.Module):
 
         L_xx, alpha = self.cached_choleskys
 
-        K_xt = self.kernel_(self.X, X_test)
+        K_tx = kernel(X_test, self.X)
         mu_t = mean(X_test)
 
-        y_t = mu_t + jnp.matmul(K_xt, alpha)
+        y_t = mu_t + jnp.matmul(K_tx, alpha)
 
-        V = jsp.lingalg.solve_triangular(L_xx, K_xt.T, lower=True)
+        V = jsp.linalg.solve_triangular(L_xx, K_tx.T, lower=True)
 
-        # if return_cov:
-        y_cov = self.kernel(X_test) - jnp.matmul(V.T, V)
+        y_cov = kernel(X_test) - jnp.matmul(V.T, V) + self.jitter(X_test.shape[0],value=sq_noise)
 
         return y_t, y_cov
-        # elif return_std:
-        #     # Compute variance of predictive distribution
-        #     # Use einsum to avoid explicitly forming the large matrix
-        #     # V^T @ V just to extract its diagonal afterward.
-        #     y_var = self.kernel.diag(self.X).copy()
-        #     y_var -= np.einsum("ij,ji->i", V.T, V)
-
-        #     # Check if any of the variances is negative because of
-        #     # numerical issues. If yes: set the variance to 0.
-        #     y_var_negative = y_var < 0
-        #     if np.any(y_var_negative):
-        #         warnings.warn(
-        #             "Predicted variances smaller than 0. "
-        #             "Setting those variances to 0."
-        #         )
-        #         y_var[y_var_negative] = 0.0
-
-        #     # undo normalisation
-        #     y_var = np.outer(y_var, self._y_train_std**2).reshape(*y_var.shape, -1)
-
-        #     # if y_var has shape (n_samples, 1), reshape to (n_samples,)
-        #     if y_var.shape[1] == 1:
-        #         y_var = np.squeeze(y_var, axis=1)
-
-        #     return y_mean, jnp.sqrt(y_var)
-        # else:
-        #     return y_mean
-
-    # def sample(
-    #     self,
-    #     key: jax.random.KeyArray,
-    #     shape: Sequence[int] | None = None,
-    # ) -> jax.Array:
-    #     """Generate samples from the prior process
-
-    #     Args:
-    #         key: A ``jax`` random number key array. shape (tuple, optional): The
-    #         number and shape of samples to
-    #             generate.
-
-    #     Returns:
-    #         The sampled realizations from the process with shape ``(N_data,) +
-    #         shape`` where ``N_data`` is the zeroth dimension of the ``X``
-    #         coordinates provided when instantiating this process.
-    #     """
-    #     return self._sample(key, shape)
-
-    # @partial(jax.jit, static_argnums=(2,))
-    # def _sample(
-    #     self,
-    #     key: jax.random.KeyArray,
-    #     shape: Sequence[int] | None,
-    # ) -> jax.Array:
-    #     if shape is None:
-    #         shape = (self.num_data,)
-    #     else:
-    #         shape = (self.num_data,) + tuple(shape)
-    #     normal_samples = jax.random.normal(key, shape=shape, dtype=self.dtype)
-    #     return self.mean + jnp.moveaxis(
-    #         self.solver.dot_triangular(normal_samples), 0, -1
-    #     )
