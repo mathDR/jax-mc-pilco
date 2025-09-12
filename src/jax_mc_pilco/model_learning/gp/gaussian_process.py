@@ -174,10 +174,11 @@ class SparseVariationalGaussianProcess(eqx.Module):
 
         self.params = params
         self.optimized = optimized
-        if cached_choleskys is None:
-            self.cached_choleksys = self.compute_cached_choleskys(params)
-        else:
+
+        if cached_choleskys:
             self.cached_choleskys = cached_choleskys
+        else:
+            self.cached_choleskys = self.compute_cached_choleskys(self.params)
 
     def jitter(self, d, value=1e-6):
         return jnp.eye(d) * value
@@ -257,7 +258,6 @@ class SparseVariationalGaussianProcess(eqx.Module):
 
         return (L_z, L_AAT, Kzz_inv_Kzx_diff)
 
-    @jax.jit
     def predict(
         self,
         X_test: ArrayLike | None = None,
@@ -515,7 +515,6 @@ class GaussianProcess(eqx.Module):
 
         return (L_xx, alpha)
 
-    @jax.jit
     def predict(
         self,
         X_test: ArrayLike | None = None,

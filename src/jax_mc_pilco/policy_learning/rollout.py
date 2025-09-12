@@ -2,6 +2,7 @@
 
 import copy
 import equinox as eqx
+import equinox.internal as eqxi
 import optax
 import jax
 import jax.numpy as jnp
@@ -11,6 +12,26 @@ import jax.random as jr
 import gymnasium
 
 
+def filter_cond(pred, true_fun, false_fun, *operands):
+    dynamic, static = eqx.partition(operands, eqx.is_array)
+
+    def _true_fun(_dynamic):
+        _operands = eqx.combine(_dynamic, static)
+        _out = true_fun(*_operands)
+        _dynamic_out, _static_out = eqx.partition(_out, eqx.is_array)
+        return _dynamic_out, eqxi.Static(_static_out)
+
+    def _false_fun(_dynamic):
+        _operands = eqx.combine(_dynamic, static)
+        _out = false_fun(*_operands)
+        _dynamic_out, _static_out = eqx.partition(_out, eqx.is_array)
+        return _dynamic_out, eqxi.Static(_static_out)
+
+    dynamic_out, static_out = jax.lax.cond(pred, _true_fun, _false_fun, dynamic)
+    return eqx.combine(dynamic_out, static_out.value)
+
+
+@eqx.filter_jit
 def fit_controller(  # noqa: PLR0913
     *,
     policy: eqx.Module,
@@ -25,29 +46,30 @@ def fit_controller(  # noqa: PLR0913
     max_steps: Int = 100,
     patience: Int = 7,
     unroll: Int = 5,
-) -> Tuple[eqx.Module, Array]:
+    gtol: float = 1e-5,
+) -> Tuple[eqx.Module, Float]:
     """The optimization loop for fitting the policy parameters."""
 
     sample_train, _ = env.reset(
         options={"x_init": initial_state[0], "y_init": initial_state[1]}
     )
-    key, subkey = jr.split(key)
     # Generate an initial action
     action_train = policy(sample_train, 0.0)
     # initialize some particles
+    key, subkey = jr.split(key)
     initial_train_particles = gp_model.get_samples(
-        key, jnp.array([sample_train]), jnp.array([action_train]), num_particles
+        subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
 
     sample_val, _ = env.reset(
         options={"x_init": initial_state[0], "y_init": initial_state[1]}
     )
-    key, subkey = jr.split(key)
     # Generate an initial action
     action_val = policy(sample_val, 0.0)
     # initialize some particles
+    key, subkey = jr.split(key)
     initial_val_particles = gp_model.get_samples(
-        key, jnp.array([sample_val]), jnp.array([action_val]), num_particles
+        subkey, jnp.array([sample_val]), jnp.array([action_val]), num_particles
     )
 
     @eqx.debug.assert_max_traces(max_traces=1)
@@ -95,7 +117,7 @@ def fit_controller(  # noqa: PLR0913
             actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
 
             key, subkey = jr.split(key)
-            samples = model.get_samples(key, samples, actions, 1)
+            samples = model.get_samples(subkey, samples, actions, 1)
             cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, actions))))
             return (policy_params, key, samples, total_cost + cost), cost
 
@@ -108,46 +130,49 @@ def fit_controller(  # noqa: PLR0913
     opt_state = optim.init(eqx.filter(policy, eqx.is_array))
 
     # Optimisation step.
-    @eqx.filter_jit
-    def make_step(
-        policy: eqx.Module,
-        opt_state: PyTree,
-    ) -> Tuple[eqx.Module, PyTree, Float]:
-        loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(
-            policy, initial_train_particles, gp_model, timesteps
-        )
-        updates, opt_state = optim.update(
-            loss_gradient, opt_state, eqx.filter(policy, eqx.is_array)
-        )
-        policy = eqx.apply_updates(policy, updates)
-        return policy, opt_state, loss_value
 
-    val_losses = []
-    step = 0
+    def true_fun(arg):
+        policy_params, best_policy_params, loss_value, iterations_since_improvement, best_loss = arg
+        return loss_value, policy_params, iterations_since_improvement-iterations_since_improvement
+    def false_fun(arg):
+        policy_params, best_policy_params, loss_value, iterations_since_improvement, best_loss = arg
+        return best_loss, best_policy_params, iterations_since_improvement+1
+
+    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
+
+    @eqx.filter_jit
+    def make_step(carry):
+        policy_params, best_policy_params, iterations_since_improvement, opt_state, best_loss = carry
+        policy = eqx.combine(policy_params,policy_static)
+
+        loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(policy, initial_train_particles, gp_model, timesteps)
+        updates, opt_state = optim.update(loss_gradient, opt_state, eqx.filter(policy, eqx.is_array))
+
+        policy = eqx.apply_updates(policy, updates)
+
+        best_loss = jax.lax.cond(jnp.isfinite(best_loss), lambda z: z[0], lambda z: z[1], (best_loss,loss_value))
+        best_loss, best_policy_params, iterations_since_improvement = filter_cond(
+            loss_value < best_loss,
+            true_fun,
+            false_fun,
+            (policy_params, best_policy_params, loss_value, iterations_since_improvement, best_loss)
+        )
+        return policy_params, best_policy_params, iterations_since_improvement, opt_state, best_loss
+
+    def continue_fn(carry):
+        _, _, iterations_since_improvement, opt_state, _ = carry
+        n = optax.tree_utils.tree_get(opt_state[0], "count")
+        g = optax.tree_utils.tree_get(opt_state, "grad")
+        g_l2_norm = optax.tree_utils.tree_norm(g)
+        return (n == 0) | ((n < max_steps) & (g_l2_norm >= gtol)) | (iterations_since_improvement <= patience)
+
+    # Optimisation loop
     best_loss = jnp.inf
     iterations_since_improvement = 0
+    _, best_policy_params, _, _, best_loss = jax.lax.while_loop(
+        continue_fn,
+        make_step,
+        (policy_params, policy_params, iterations_since_improvement, opt_state, best_loss),
+    )
 
-    while step < max_steps:
-        policy, opt_state, train_loss = make_step(policy, opt_state)
-        val_loss = val_rollout(policy, initial_val_particles, gp_model, timesteps)
-        val_losses.append(val_loss)
-
-        if len(val_losses) == 1 or val_loss < best_loss:
-            print(f"\t   (New best performance {val_loss.item()})")
-            best_loss = val_loss
-            best_policy = jax.tree.map(
-                lambda x: x.copy() if eqx.is_array(x) else copy.deepcopy(x), policy
-            )
-            iterations_since_improvement = 0
-
-        elif iterations_since_improvement <= patience:
-            print(
-                f"Early stopping due to no improvement over the last {patience} steps"
-            )
-            break
-        if (step % 50) == 0 or (step == max_steps - 1):
-            print(f"{step=}, validation_loss={val_loss.item()}, ")
-        step += 1
-        iterations_since_improvement += 1
-
-    return best_policy, jnp.array(val_losses)
+    return eqx.combine(best_policy_params, policy_static), best_loss
