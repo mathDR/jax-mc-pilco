@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
 
-def softplus(X: ArrayLike)->jax.Array:
+def softplus(X: ArrayLike) -> jax.Array:
     return jnp.log(1 + jnp.exp(X))
 
 
@@ -197,19 +197,19 @@ class SparseVariationalGaussianProcess(eqx.Module):
         K_zz = kernel(z, z) + self.jitter(z.shape[0])
         K_zx = kernel(z, self.X)
         Kxx_diag = jax.vmap(kernel, in_axes=(0, 0))(self.X, self.X)
-        mu = self.mean(**params["mean"])(self.X)
+        mu_x = self.mean(**params["mean"])(self.X)
 
         Lz = jnp.linalg.cholesky(K_zz)  # m x m
 
-        A = jsp.linalg.solve_triangular(Lz, K_zx, lower=True) / noise  # m x n
+        A = jsp.linalg.cho_solve((Lz, True), K_zx) / noise  # m x n
         AAT = jnp.matmul(A, A.T)  # m x m
         B = jnp.eye(z.shape[0]) + AAT  # m x m
         LB = jnp.linalg.cholesky(B)  # m x m
 
         log_det_B = 2.0 * jnp.sum(jnp.log(jnp.diagonal(LB)))
-        diff = self.y - mu
+        diff = jnp.squeeze(self.y) - mu_x
 
-        L_inv_A_diff = jsp.linalg.solve_triangular(LB, jnp.matmul(A, diff), lower=True)
+        L_inv_A_diff = jsp.linalg.cho_solve((LB, True), jnp.matmul(A, diff))
         quad = (
             jnp.sum(jnp.square(diff)) - jnp.sum(jnp.square(L_inv_A_diff))
         ) / sq_noise
@@ -235,7 +235,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
         kernel = self.kernel(**params["kernel"])
 
         mean = self.mean(**params["mean"])
-        mu = mean(self.X)
+        mu_x = mean(self.X)
 
         K_zz = kernel(z, z) + self.jitter(z.shape[0])
         L_z = jnp.linalg.cholesky(K_zz)
@@ -248,13 +248,13 @@ class SparseVariationalGaussianProcess(eqx.Module):
         AAT = jnp.matmul(A, A.T)
         L_AAT = jnp.linalg.cholesky(AAT + jnp.eye(self.num_inducing_points))
 
-        diff = self.y - mu
+        diff = jnp.squeeze(self.y) - mu_x
 
         Lz_inv_Kzx_diff = jsp.linalg.cho_solve(
             (L_AAT, True), jnp.matmul(Lz_inv_Kzx, diff)
         )
 
-        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z, True), Lz_inv_Kzx_diff)
+        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z.T, False), Lz_inv_Kzx_diff)
 
         return (L_z, L_AAT, Kzz_inv_Kzx_diff)
 
@@ -292,7 +292,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
         mean = self.mean(**self.params["mean"])
         mu = mean(self.X)
 
-        L_z, L_AAT, Kzz_inv_Kzx_diff = self.compute_cached_choleskys(self.params)
+        L_z, L_AAT, Kzz_inv_Kzx_diff = self.cached_choleskys
 
         K_tt = kernel(X_test, X_test)
         K_zt = kernel(z, X_test)
@@ -300,7 +300,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
         mu_t = mean(X_test)
 
         Lz_inv_Kzt = jsp.linalg.cho_solve((L_z, True), K_zt)
-        L_inv_Lz_inv_Kzt = jsp.linalg.solve_triangular(L_AAT, Lz_inv_Kzt, lower=True)
+        L_inv_Lz_inv_Kzt = jsp.linalg.cho_solve((L_AAT, True), Lz_inv_Kzt)
 
         f_q = mu_t + jnp.matmul(K_zt.T / sq_noise, Kzz_inv_Kzx_diff)
 
@@ -508,7 +508,7 @@ class GaussianProcess(eqx.Module):
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + self.jitter(self.num_data,value=sq_noise)
+        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
 
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
         alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
@@ -554,6 +554,10 @@ class GaussianProcess(eqx.Module):
 
         V = jsp.linalg.solve_triangular(L_xx, K_tx.T, lower=True)
 
-        y_cov = kernel(X_test) - jnp.matmul(V.T, V) + self.jitter(X_test.shape[0],value=sq_noise)
+        y_cov = (
+            kernel(X_test)
+            - jnp.matmul(V.T, V)
+            + self.jitter(X_test.shape[0], value=sq_noise)
+        )
 
         return y_t, y_cov
