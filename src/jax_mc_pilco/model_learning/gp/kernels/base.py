@@ -22,10 +22,15 @@ import jax
 import jax.numpy as jnp
 
 
-if TYPE_CHECKING:
-    from jax_pilco.model_learning.solvers.solver import Solver
-
 Axis = Union[int, Sequence[int]]
+
+
+def softplus(X):
+    return jnp.log(1 + jnp.exp(X))
+
+
+def softplus_inverse(X):
+    return jnp.log(jnp.exp(X) - 1)
 
 
 class Kernel(eqx.Module):
@@ -125,33 +130,6 @@ class Kernel(eqx.Module):
         if isinstance(other, Kernel):
             return Product(other, self)
         return Product(Constant(other), self)
-
-
-class Conditioned(Kernel):
-    """A kernel used when conditioning a process on data
-
-    Args:
-        X: The coordinates of the data.
-        scale_tril: The lower Cholesky factor of the base process' kernel
-            matrix.
-        kernel: The predictive kernel; this will generally be the kernel
-            used by the original process.
-    """
-
-    X: ArrayLike
-    solver: Solver
-    kernel: Kernel
-
-    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
-        kernel_vec = jax.vmap(self.kernel.evaluate, in_axes=(0, None))
-        K1 = self.solver.solve_triangular(kernel_vec(self.X, X1))
-        K2 = self.solver.solve_triangular(kernel_vec(self.X, X2))
-        return self.kernel.evaluate(X1, X2) - K1.transpose() @ K2
-
-    def evaluate_diag(self, X: ArrayLike) -> jax.Array:
-        kernel_vec = jax.vmap(self.kernel.evaluate, in_axes=(0, None))
-        K = self.solver.solve_triangular(kernel_vec(self.X, X))
-        return self.kernel.evaluate_diag(X) - K.transpose() @ K
 
 
 class Custom(Kernel):

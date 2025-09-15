@@ -4,13 +4,15 @@ from __future__ import annotations
 
 __all__ = [
     "Mean",
-    "Custom",
-    "Sum",
-    "Product",
-    "Constant",
-    "Linear",
+    "CustomMean",
+    "SumMean",
+    "ProductMean",
+    "ConstantMean",
+    "LinearMean",
+    "ZeroMean",
 ]
 
+from abc import abstractmethod
 from jaxtyping import ArrayLike
 
 from typing import TYPE_CHECKING, Any, Callable
@@ -23,13 +25,30 @@ import jax.numpy as jnp
 class Mean(eqx.Module):
     """A base class for GP Means"""
 
-    value: ArrayLike | None = None
+    @abstractmethod
+    def evaluate(self, X: ArrayLike) -> jax.Array:
+        """Evaluate the mean at the inputs
 
-    def __init__(self, value: ArrayLike):
-        self.value = value
+        This should be overridden be subclasses to return the kernel-specific
+        value. Two things to note:
 
-    def __call__(self, X: ArrayLike) -> jax.Array:
+        1. Users shouldn't generally call :func:`Mean.evaluate`. Instead,
+           always "call" the kernel instance directly; for example, you can
+           evaluate the ConstantMean (with the constant being 1.0) using
+           ``ConstantMean(1.0)(x)``, for an array of inputs ``x``.
+        2. When implementing a custom mean, this method should treat ``X``
+           as a single datapoint. In other words, the input will
+           typically either be a scalar of shape ``n_dim``, where ``n_dim``
+           is the number of input dimensions, rather than ``n_data`` or
+           ``(n_data, n_dim)``, and you should let the :class:`Mean` ``vmap``
+           magic handle all the broadcasting for you.
+        """
+        del X
         raise NotImplementedError
+
+    def __call__(self, X: ArrayLike | None = None) -> jax.Array:
+        m = jax.vmap(self.evaluate, in_axes=0)(X)
+        return m
 
     def __add__(self, other: Mean | ArrayLike) -> Mean:
         if isinstance(other, Mean):
@@ -55,7 +74,20 @@ class Mean(eqx.Module):
         return Product(Constant(other), self)
 
 
-class Constant(Mean):
+class ZeroMean(Mean):
+    r"""This mean returns zero
+
+    .. math::
+
+        m(\mathbf{x}) = 0
+
+    """
+
+    def evaluate(self, X: ArrayLike) -> Float:
+        return 0.0
+
+
+class ConstantMean(Mean):
     r"""This mean returns the constant
 
     .. math::
@@ -68,15 +100,15 @@ class Constant(Mean):
         c: The parameter :math:`c` in the above equation.
     """
 
-    value: jax.Array | float
+    value: jax.Array | Float
 
     def evaluate(self, X: ArrayLike) -> jax.Array:
         if jnp.ndim(self.value) != 0:
             raise ValueError("The value of a constant mean must be a scalar")
-        return jnp.asarray(self.value)
+        return self.value
 
 
-class Linear(Mean):
+class LinearMean(Mean):
     r"""This mean returns the linear result
 
     .. math::
@@ -97,12 +129,12 @@ class Linear(Mean):
         return jnp.asarray(self.value[0] + self.value[1] * X)
 
 
-class Custom(Mean):
+class CustomMean(Mean):
     """A custom mean class implemented as a callable
 
     Args:
         function: A callable with a signature and behavior that matches
-            :func:`Kernel.evaluate`.
+            :func:`Mean.evaluate`.
     """
 
     function: Callable[[Any], Any] = eqx.field(static=True)
@@ -111,7 +143,7 @@ class Custom(Mean):
         return self.function(X)
 
 
-class Sum(Mean):
+class SumMean(Mean):
     """A helper to represent the sum of two means"""
 
     mean1: Mean
@@ -121,7 +153,7 @@ class Sum(Mean):
         return self.mean1.evaluate(X) + self.mean2.evaluate(X)
 
 
-class Product(Kernel):
+class ProductMean(Mean):
     """A helper to represent the product of two kernels"""
 
     mean1: Mean
@@ -129,27 +161,3 @@ class Product(Kernel):
 
     def evaluate(self, X: ArrayLike) -> jax.Array:
         return self.mean1.evaluate(X) * self.mean2.evaluate(X)
-
-
-class Polynomial(Kernel):
-    r"""A polynomial kernel
-
-    .. math::
-
-        k(\mathbf{x}_i,\,\mathbf{x}_j) = [(\mathbf{x}_i / \ell) \cdot
-            (\mathbf{x}_j / \ell) + \sigma^2]^P
-
-    Args:
-        order: The power :math:`P`.
-        scale: The parameter :math:`\ell`.
-        sigma: The parameter :math:`\sigma`.
-    """
-
-    order: ArrayLike | float
-    scale: ArrayLike | float = eqx.field(default_factory=lambda: jnp.ones(()))
-    sigma: ArrayLike | float = eqx.field(default_factory=lambda: jnp.zeros(()))
-
-    def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:
-        return (
-            (X1 / self.scale) @ (X2 / self.scale) + jnp.square(self.sigma)
-        ) ** self.order

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["GaussianProcess", "SparseGaussianProcess"]
+__all__ = ["GaussianProcess", "SparseVariationalGaussianProcess"]
 
 from collections.abc import Sequence
 from functools import partial
@@ -8,358 +8,133 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Dict
     NamedTuple,
-    Tuple,
-    Union
 )
-from jaxtyping import ArrayLike, Float
+from jaxtyping import ArrayLike
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
+import warnings
+import jax.scipy as jsp
 
-import jax_mc_pilco.model_learning.gp.kernels as kernels
-import jax_mc_pilco.model_learning.gp.means as means
-
-from jax_mc_pilco.model_learning.gp.noise import Diagonal, Noise
-from jax_mc_pilco.model_learning.gp.solver import DirectSolver
+from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
+from jax_mc_pilco.model_learning.gp.means import ZeroMean, Mean
 
 if TYPE_CHECKING:
     from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
 
-class GaussianProcess(eqx.Module):
-    """An interface for designing a Gaussian Process regression model
+def softplus(X: ArrayLike) -> jax.Array:
+    return jnp.log(1 + jnp.exp(X))
+
+
+def svgp_fit(
+    model: SparseVariationalGaussianProcess,
+    *,
+    max_iters: int = 500,
+    max_linesearch_steps: int = 32,
+    gtol: float = 1e-5,
+) -> SparseVariationalGaussianProcess:
+    r"""Maximize the collapsed expected lower bound (ELBO) for the given SparseVariationalGaussianProcess
+
+    Uses Optax's LBFGS implementation and a jax.lax.while loop.
+
+     Args:
+         params: the parameters of the kernel, mean, likelihood and inducing point locations.
+         max_iters (int): The maximum number of optimisation steps to run. Defaults
+             to 500.
+         max_linesearch_steps (int): The maximum number of linesearch steps to use
+            for finding the stepsize.Defaults to 32.
+         gtol (float): Terminate the optimisation if the L2 norm of the gradient is
+            below this threshold. Defaults to 1e-8.
+
+     Returns:
+         A new SparseVariationalGaussianProcess with the optimized parameters and properties.
+    """
+    vals, static = eqx.partition(model.params, eqx.is_array)
+
+    @jax.jit
+    def loss(vals: Dict) -> Float:
+        params = eqx.combine(vals, static)
+        return -model.collapsed_elbo(params)
+
+    # Initialise optimiser
+    optim = optax.lbfgs(
+        linesearch=optax.scale_by_zoom_linesearch(
+            max_linesearch_steps=max_linesearch_steps,
+            initial_guess_strategy="one",
+        )
+    )
+
+    opt_state = optim.init(model.params)
+    loss_value_and_grad = optax.value_and_grad_from_state(loss)
+
+    # Optimisation step.
+    @jax.jit
+    def step(carry):
+        vals, opt_state = carry
+        # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
+        # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
+        loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
+        updates, opt_state = optim.update(
+            loss_gradient,
+            opt_state,
+            vals,
+            value=loss_val,
+            grad=loss_gradient,
+            value_fn=loss,
+        )
+        vals = optax.apply_updates(vals, updates)
+
+        return vals, opt_state
+
+    def continue_fn(carry):
+        _, opt_state = carry
+        n = optax.tree_utils.tree_get(opt_state, "count")
+        g = optax.tree_utils.tree_get(opt_state, "grad")
+        g_l2_norm = optax.tree_utils.tree_norm(g)
+        return (n == 0) | ((n < max_iters) & (g_l2_norm >= gtol))
+
+    # Optimisation loop
+    opt_vals, opt_state = jax.lax.while_loop(
+        continue_fn,
+        step,
+        (vals, opt_state),
+    )
+    final_loss = optax.tree_utils.tree_get(opt_state, "value")
+    final_params = eqx.combine(opt_vals, static)
+
+    cached_choleskys = model.compute_cached_choleskys(final_params)
+
+    return SparseVariationalGaussianProcess(
+        model.kernel,
+        model.X,
+        model.y,
+        model.num_inducing_points,
+        final_params,
+        mean=model.mean,
+        optimized=True,
+        cached_choleskys=cached_choleskys,
+    )
+
+
+class SparseVariationalGaussianProcess(eqx.Module):
+    """An interface for designing a Sparse Gaussian Process regression model
 
     Args:
         kernel (Kernel): The kernel function
         X (ArrayLike): The input coordinates. This can be any PyTree that is
             compatible with ``kernel`` where the zeroth dimension is ``N_data``,
             the size of the data set.
-        diag (ArrayLike, optional): The value to add to the diagonal of the
-            covariance matrix, often used to capture measurement uncertainty.
-            This should be a scalar or have the shape ``(N_data,)``. If not
-            provided, this will default to the square root of machine epsilon
-            for the data type being used. This can sometimes be sufficient to
-            avoid numerical issues, but if you're getting NaNs, try increasing
-            this value.
-        noise (Noise, optional): Used to implement more expressive observation
-            noise models than those supported by just ``diag``. This can be any
-            object that implements the :class:`noise.Noise` protocol. If
-            this is provided, the ``diag`` parameter will be ignored.
-        mean (Mean): The mean function called with ``X`` as input: ``mean(X)``
-    """
-
-    num_data: int = eqx.field(static=True)
-    dtype: np.dtype = eqx.field(static=True)
-    kernel: Kernel
-    X: ArrayLike
-    mean: means.Mean
-    noise: Noise
-    solver: DirectSolver
-
-    def __init__(
-        self,
-        kernel: Kernel,
-        X: ArrayLike,
-        *,
-        diag: ArrayLike | None = None,
-        noise: Noise | None = None,
-        mean: means.Mean | None = None,
-        covariance_value: Any | None = None,
-    ):
-        self.kernel = kernel
-        self.X = X
-
-        if mean:
-            self.mean = mean
-        else:
-            self.mean = means.ConstantMean(0)
-
-        self.num_data = mean_value.shape[0]
-        self.dtype = mean_value.dtype
-        self.mean = mean_value
-
-
-        if noise is None:
-            diag = _default_diag(self.mean) if diag is None else diag
-            noise = Diagonal(diag=jnp.broadcast_to(diag, self.mean.shape))
-        self.noise = noise
-
-        self.solver = DirectSolver(
-            kernel,
-            self.X,
-            self.noise,
-            covariance=covariance_value,
-        )
-
-    @property
-    def loc(self) -> jax.Array:
-        return self.mean(self.X)
-
-    @property
-    def variance(self) -> jax.Array:
-        return self.solver.variance()
-
-    @property
-    def covariance(self) -> jax.Array:
-        return self.solver.covariance()
-
-    def log_probability(self, y: ArrayLike) -> jax.Array:
-        """Compute the log probability of this multivariate normal
-
-        Args:
-            y (ArrayLike): The observed data. This should have the shape
-                ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
-                data provided when instantiating this object.
-
-        Returns:
-            The marginal log probability of this multivariate normal model,
-            evaluated at ``y``.
-        """
-        return self._compute_log_prob(self._get_alpha(y))
-
-    def condition(
-        self,
-        y: ArrayLike,
-        X_test: ArrayLike | None = None,
-        *,
-        diag: ArrayLike | None = None,
-        noise: Noise | None = None,
-        include_mean: bool = True,
-        kernel: Kernel | None = None,
-    ) -> ConditionResult:
-        """Condition the model on observed data and
-
-        Args:
-            y (ArrayLike): The observed data. This should have the shape
-                ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
-                data provided when instantiating this object.
-            X_test (ArrayLike, optional): The coordinates where the prediction
-                should be evaluated. This should have a data type compatible
-                with the ``X`` data provided when instantiating this object. If
-                it is not provided, ``X`` will be used by default, so the
-                predictions will be made.
-            diag (ArrayLike, optional): Will be passed as the diagonal to the
-                conditioned ``GaussianProcess`` object, so this can be used to
-                introduce, for example, observational noise to predicted data.
-            include_mean (bool, optional): If ``True`` (default), the predicted
-                values will include the mean function evaluated at ``X_test``.
-            kernel (Kernel, optional): A kernel to optionally specify the
-                covariance between the observed data and predicted data. See
-                :ref:`mixture` for an example.
-
-        Returns:
-            A named tuple where the first element ``log_probability`` is the log
-            marginal probability of the model, and the second element ``gp`` is
-            the :class:`GaussianProcess` object describing the conditional
-            distribution evaluated at ``X_test``.
-        """
-        # If X_test is provided, we need to check that the tree structure
-        # matches that of the input data, and that the shapes are all compatible
-        # (i.e. the dimension of the inputs must match). This is slightly
-        # convoluted since we need to support arbitrary pytrees.
-        if X_test is not None:
-            matches = jax.tree_util.tree_map(
-                lambda a, b: jnp.ndim(a) == jnp.ndim(b)
-                and jnp.shape(a)[1:] == jnp.shape(b)[1:],
-                self.X,
-                X_test,
-            )
-            if not jax.tree_util.tree_reduce(lambda a, b: a and b, matches):
-                raise ValueError(
-                    "`X_test` must have the same tree structure as the input `X`, "
-                    "and all but the leading dimension must have matching sizes"
-                )
-
-        alpha, log_prob, mean_value = self._condition(y, X_test, include_mean, kernel)
-        if kernel is None:
-            kernel = self.kernel
-
-        if noise is None:
-            diag = _default_diag(mean_value) if diag is None else diag
-            noise = Diagonal(diag=jnp.broadcast_to(diag, mean_value.shape))
-
-        covariance_value = self.solver.condition(kernel, X_test, noise)
-        if X_test is None:
-            X_test = self.X
-
-        # The conditional GP will also be a GP with the mean an covariance
-        # specified by a :class:`means.Conditioned` and
-        # :class:`kernels.Conditioned` respectively.
-        gp = GaussianProcess(
-            kernels.Conditioned(self.X, self.solver, kernel),
-            X_test,
-            noise=noise,
-            mean=means.Conditioned(
-                self.X,
-                alpha,
-                kernel,
-                include_mean=include_mean,
-                mean_function=self.mean_function,
-            ),
-            mean_value=mean_value,
-            covariance_value=covariance_value,
-        )
-
-        return ConditionResult(log_prob, gp)
-
-    @partial(
-        jax.jit,
-        static_argnames=("include_mean", "return_var", "return_cov"),
-    )
-    def predict(
-        self,
-        y: ArrayLike,
-        X_test: ArrayLike | None = None,
-        *,
-        kernel: Kernel | None = None,
-        include_mean: bool = True,
-        return_var: bool = False,
-        return_cov: bool = False,
-    ) -> jax.Array | tuple[jax.Array, jax.Array]:
-        """Predict the GP model at new test points conditioned on observed data
-
-        Args:
-            y (ArrayLike): The observed data. This should have the shape
-                ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
-                data provided when instantiating this object.
-            X_test (ArrayLike, optional): The coordinates where the prediction
-                should be evaluated. This should have a data type compatible
-                with the ``X`` data provided when instantiating this object. If
-                it is not provided, ``X`` will be used by default, so the
-                predictions will be made.
-            include_mean (bool, optional): If ``True`` (default), the predicted
-                values will include the mean function evaluated at ``X_test``.
-            return_var (bool, optional): If ``True``, the variance of the
-                predicted values at ``X_test`` will be returned.
-            return_cov (bool, optional): If ``True``, the covariance of the
-                predicted values at ``X_test`` will be returned. If
-                ``return_var`` is ``True``, this flag will be ignored.
-
-        Returns:
-            The mean of the predictive model evaluated at ``X_test``, with shape
-            ``(N_test,)`` where ``N_test`` is the zeroth dimension of
-            ``X_test``. If either ``return_var`` or ``return_cov`` is ``True``,
-            the variance or covariance of the predicted process will also be
-            returned with shape ``(N_test,)`` or ``(N_test, N_test)``
-            respectively.
-        """
-        _, cond = self.condition(y, X_test, kernel=kernel, include_mean=include_mean)
-        if return_var:
-            return cond.loc, cond.variance
-        if return_cov:
-            return cond.loc, cond.covariance
-        return cond.loc
-
-    def sample(
-        self,
-        key: jax.random.KeyArray,
-        shape: Sequence[int] | None = None,
-    ) -> jax.Array:
-        """Generate samples from the prior process
-
-        Args:
-            key: A ``jax`` random number key array. shape (tuple, optional): The
-            number and shape of samples to
-                generate.
-
-        Returns:
-            The sampled realizations from the process with shape ``(N_data,) +
-            shape`` where ``N_data`` is the zeroth dimension of the ``X``
-            coordinates provided when instantiating this process.
-        """
-        return self._sample(key, shape)
-
-    def numpyro_dist(self, **kwargs: Any) -> TinyDistribution:
-        """Get the numpyro MultivariateNormal distribution for this process"""
-        from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
-
-        return TinyDistribution(self, **kwargs)
-
-    @partial(jax.jit, static_argnums=(2,))
-    def _sample(
-        self,
-        key: jax.random.KeyArray,
-        shape: Sequence[int] | None,
-    ) -> jax.Array:
-        if shape is None:
-            shape = (self.num_data,)
-        else:
-            shape = (self.num_data,) + tuple(shape)
-        normal_samples = jax.random.normal(key, shape=shape, dtype=self.dtype)
-        return self.mean + jnp.moveaxis(
-            self.solver.dot_triangular(normal_samples), 0, -1
-        )
-
-    @jax.jit
-    def _compute_log_prob(self, alpha: ArrayLike) -> jax.Array:
-        loglike = -0.5 * jnp.sum(jnp.square(alpha)) - self.solver.normalization()
-        return jnp.where(jnp.isfinite(loglike), loglike, -jnp.inf)
-
-    @jax.jit
-    def _get_alpha(self, y: ArrayLike) -> jax.Array:
-        return self.solver.solve_triangular(y - self.loc)
-
-    @partial(jax.jit, static_argnums=(3,))
-    def _condition(
-        self,
-        y: ArrayLike,
-        X_test: ArrayLike | None,
-        include_mean: bool,
-        kernel: Kernel | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        alpha = self._get_alpha(y)
-        log_prob = self._compute_log_prob(alpha)
-
-        # Below, we actually want alpha = K^-1 y instead of alpha = L^-1 y
-        alpha = self.solver.solve_triangular(alpha, transpose=True)
-
-        if X_test is None:
-            X_test = self.X
-
-            # In this common case (where we're predicting the GP at the data
-            # points, using the original kernel), the mean is especially fast to
-            # compute; so let's use that calculation here.
-            if kernel is None:
-                delta = self.noise @ alpha
-                mean_value = y - delta
-                if not include_mean:
-                    mean_value -= self.loc
-
-            else:
-                mean_value = kernel.matmul(self.X, y=alpha)
-                if include_mean:
-                    mean_value += self.loc
-
-        else:
-            if kernel is None:
-                kernel = self.kernel
-
-            mean_value = kernel.matmul(X_test, self.X, alpha)
-            if include_mean:
-                mean_value += jax.vmap(self.mean_function)(X_test)
-
-        return alpha, log_prob, mean_value
-
-
-class SparseGaussianProcess(eqx.Module):
-    """An interface for designing a Sparse Gaussian Process regression model
-
-    Args:
-      kernel (Kernel): The kernel function
-      X (ArrayLike): The input coordinates. This can be any PyTree that is
-        compatible with ``kernel`` where the zeroth dimension is ``N_data``,
-        the size of the data set.
-      y (ArrayLike): The observed data. This should have the shape
-        ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
-        data provided when instantiating this object.
-      num_inducing_points (int): the number of inducing points.
-      mean (Mean): The mean function that will be evaluated with the ``X``
-       as input: ``mean(X)``
-      params: the parameters of the kernel, mean, likelihood and inducing point locations.
+        y (ArrayLike): The observed data. This should have the shape
+            ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
+            data provided when instantiating this object.
+        num_inducing_points (int): the number of inducing points.
+        mean (Mean): The mean function that will be evaluated with the ``X``
+          as input: ``mean(X)`` if Left
     """
 
     num_data: int = eqx.field(static=True)
@@ -369,7 +144,9 @@ class SparseGaussianProcess(eqx.Module):
     X: ArrayLike
     y: ArrayLike
     mean: Mean
-    params: ArrayLike
+    params: Dict
+    optimized: Bool
+    cached_choleskys: Tuple[ArrayLike, ArrayLike, ArrayLike]
 
     def __init__(
         self,
@@ -377,12 +154,17 @@ class SparseGaussianProcess(eqx.Module):
         X: ArrayLike,
         y: ArrayLike,
         num_inducing_points: int,
-        params: ArrayLike,
+        params: Dict,
         *,
         mean: Mean | None = None,
+        optimized: bool = False,
+        cached_choleskys: Tuple[ArrayLike, ArrayLike, ArrayLike] | None = None,
     ):
         self.kernel = kernel
-        self.mean = mean
+        if mean:
+            self.mean = mean
+        else:
+            self.mean = ZeroMean
         self.X = X
         self.y = y
 
@@ -391,6 +173,12 @@ class SparseGaussianProcess(eqx.Module):
         self.num_inducing_points = num_inducing_points
 
         self.params = params
+        self.optimized = optimized
+
+        if cached_choleskys:
+            self.cached_choleskys = cached_choleskys
+        else:
+            self.cached_choleskys = self.compute_cached_choleskys(self.params)
 
     def jitter(self, d, value=1e-6):
         return jnp.eye(d) * value
@@ -409,20 +197,19 @@ class SparseGaussianProcess(eqx.Module):
         K_zz = kernel(z, z) + self.jitter(z.shape[0])
         K_zx = kernel(z, self.X)
         Kxx_diag = jax.vmap(kernel, in_axes=(0, 0))(self.X, self.X)
-        # mu = mean(**params['mean'])(self.X)
-        mu = 0.0
+        mu_x = self.mean(**params["mean"])(self.X)
 
         Lz = jnp.linalg.cholesky(K_zz)  # m x m
 
-        A = jsp.linalg.solve_triangular(Lz, K_zx, lower=True) / noise  # m x n
+        A = jsp.linalg.cho_solve((Lz, True), K_zx) / noise  # m x n
         AAT = jnp.matmul(A, A.T)  # m x m
         B = jnp.eye(z.shape[0]) + AAT  # m x m
         LB = jnp.linalg.cholesky(B)  # m x m
 
         log_det_B = 2.0 * jnp.sum(jnp.log(jnp.diagonal(LB)))
-        diff = self.y - mu
+        diff = jnp.squeeze(self.y) - mu_x
 
-        L_inv_A_diff = jsp.linalg.solve_triangular(LB, jnp.matmul(A, diff), lower=True)
+        L_inv_A_diff = jsp.linalg.cho_solve((LB, True), jnp.matmul(A, diff))
         quad = (
             jnp.sum(jnp.square(diff)) - jnp.sum(jnp.square(L_inv_A_diff))
         ) / sq_noise
@@ -434,107 +221,21 @@ class SparseGaussianProcess(eqx.Module):
 
         return 0.5 * (two_log_prob - two_trace).squeeze()
 
-    def fit(
+    def compute_cached_choleskys(
         self,
-        *,
-        max_iters: int = 500,
-        max_linesearch_steps: int = 32,
-        gtol: float = 1e-5,
-    ) -> Tuple[Float, jax.Array]:
-        r"""Maximize the collapsed expected lower bound (ELBO).
+        params: Dict[str, float],
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        """Computes some things for reuse"""
 
-        Uses Optax's LBFGS implementation and a jax.lax.while loop.
-
-        Args:
-          max_iters (int): The maximum number of optimisation steps to run. Defaults
-            to 500.
-          max_linesearch_steps (int): The maximum number of linesearch steps to use
-            for finding the stepsize.Defaults to 32.
-          gtol (float): Terminate the optimisation if the L2 norm of the gradient is
-            below this threshold. Defaults to 1e-8.
-
-        Returns:
-          A tuple comprising the optimised model and final loss.
-        """
-        vals, static = eqx.partition(self.params, eqx.is_array)
-
-        def loss(vals: Dict) -> Float:
-            params = eqx.combine(vals, static)
-            return -self.collapsed_elbo(params)
-
-        # Initialise optimiser
-        optim = optax.lbfgs(
-            linesearch=optax.scale_by_zoom_linesearch(
-                max_linesearch_steps=max_linesearch_steps,
-                initial_guess_strategy="one",
-            )
-        )
-
-        opt_state = optim.init(params)
-        loss_value_and_grad = optax.value_and_grad_from_state(loss)
-
-        # Optimisation step.
-        def step(carry):
-            vals, opt_state = carry
-            # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
-            # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
-            loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
-            updates, opt_state = optim.update(
-                loss_gradient,
-                opt_state,
-                vals,
-                value=loss_val,
-                grad=loss_gradient,
-                value_fn=loss,
-            )
-            vals = optax.apply_updates(vals, updates)
-
-            return vals, opt_state
-
-        def continue_fn(carry):
-            _, opt_state = carry
-            n = optax.tree_utils.tree_get(opt_state, "count")
-            g = optax.tree_utils.tree_get(opt_state, "grad")
-            g_l2_norm = optax.tree_utils.tree_norm(g)
-            return (n == 0) | ((n < max_iters) & (g_l2_norm >= gtol))
-
-        # Optimisation loop
-        opt_vals, opt_state = jax.lax.while_loop(
-            continue_fn,
-            step,
-            (vals, opt_state),
-        )
-        final_loss = optax.tree_utils.tree_get(opt_state, "value")
-        self.params = eqx.combine(opt_vals, static) # Do I need to do a eqx.tree_at here?
-
-    def predict(
-        self,
-        X_test: ArrayLike | None = None,
-    ) -> jax.Array | tuple[jax.Array, jax.Array]:
-        """Predict the GP model at new test points conditioned on observed data
-
-        Args:
-          X_test (ArrayLike, optional): The coordinates where the prediction
-            should be evaluated. This should have a data type compatible
-            with the ``X`` data provided when instantiating this object. If
-            it is not provided, ``X`` will be used by default, so the
-            predictions will be made.
-
-        Returns:
-          The mean and covariance of the predictive model evaluated at ``X_test``, with shape
-          ``(N_test,)`` and ``(N_test, N_test)`` where ``N_test`` is the zeroth dimension of
-          ``X_test``.
-        """
-
-        # Compute mu and Covariance
-        log_noise = self.params["likelihood"]["log_diag"]
+        log_noise = params["likelihood"]["log_diag"]
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
         z = params["inducing_point_locations"]
-        kernel = self.kernel(**self.params["kernel"])
-        mean = self.mean(**self.params['mean'])
-        mu = mean(self.X)
+        kernel = self.kernel(**params["kernel"])
+
+        mean = self.mean(**params["mean"])
+        mu_x = mean(self.X)
 
         K_zz = kernel(z, z) + self.jitter(z.shape[0])
         L_z = jnp.linalg.cholesky(K_zz)
@@ -545,13 +246,53 @@ class SparseGaussianProcess(eqx.Module):
 
         A = Lz_inv_Kzx / noise
         AAT = jnp.matmul(A, A.T)
-        L = jnp.linalg.cholesky(AAT + jnp.eye(self.num_inducing_points))
+        L_AAT = jnp.linalg.cholesky(AAT + jnp.eye(self.num_inducing_points))
 
-        diff = self.y - mu
+        diff = jnp.squeeze(self.y) - mu_x
 
-        Lz_inv_Kzx_diff = jsp.linalg.cho_solve((L, True), jnp.matmul(Lz_inv_Kzx, diff))
+        Lz_inv_Kzx_diff = jsp.linalg.cho_solve(
+            (L_AAT, True), jnp.matmul(Lz_inv_Kzx, diff)
+        )
 
-        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z, True), Lz_inv_Kzx_diff)
+        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z.T, False), Lz_inv_Kzx_diff)
+
+        return (L_z, L_AAT, Kzz_inv_Kzx_diff)
+
+    def predict(
+        self,
+        X_test: ArrayLike | None = None,
+    ) -> jax.Array | Tuple[jax.Array, jax.Array]:
+        """Predict the GP model at new test points conditioned on observed data.
+           This method caches the intermediate
+
+        Args:
+            X_test (ArrayLike, optional): The coordinates where the prediction
+                should be evaluated. This should have a data type compatible
+                with the ``X`` data provided when instantiating this object. If
+                it is not provided, ``X`` will be used by default, so the
+                predictions will be made.
+
+        Returns:
+            The mean and covariance of the predictive model evaluated at ``X_test``, with shape
+            ``(N_test,)`` and ``(N_test, N_test)`` where ``N_test`` is the zeroth dimension of
+            ``X_test``.
+        """
+
+        # Compute mu and Covariance
+        if not self.optimized:
+            warnings.warn("You are calling predict on an unoptimized gp.")
+
+        log_noise = self.params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        z = self.params["inducing_point_locations"]
+        kernel = self.kernel(**self.params["kernel"])
+
+        mean = self.mean(**self.params["mean"])
+        mu = mean(self.X)
+
+        L_z, L_AAT, Kzz_inv_Kzx_diff = self.cached_choleskys
 
         K_tt = kernel(X_test, X_test)
         K_zt = kernel(z, X_test)
@@ -559,7 +300,7 @@ class SparseGaussianProcess(eqx.Module):
         mu_t = mean(X_test)
 
         Lz_inv_Kzt = jsp.linalg.cho_solve((L_z, True), K_zt)
-        L_inv_Lz_inv_Kzt = jsp.linalg.solve_triangular(L, Lz_inv_Kzt, lower=True)
+        L_inv_Lz_inv_Kzt = jsp.linalg.cho_solve((L_AAT, True), Lz_inv_Kzt)
 
         f_q = mu_t + jnp.matmul(K_zt.T / sq_noise, Kzz_inv_Kzx_diff)
 
@@ -573,33 +314,250 @@ class SparseGaussianProcess(eqx.Module):
         return jnp.atleast_1d(f_q.squeeze()), f_q_cov
 
 
-class ConditionResult(NamedTuple):
-    """The result of conditioning a :class:`GaussianProcess` on data
+def gp_fit(
+    model: GaussianProcess,
+    *,
+    max_iters: int = 500,
+    max_linesearch_steps: int = 32,
+    gtol: float = 1e-5,
+) -> GaussianProcess:
+    r"""Maximize the log marginal likelihood for the given GaussianProcess
 
-    This has two entries, ``log_probability`` and ``gp``, that are described
-    below.
+    Uses Optax's LBFGS implementation and a jax.lax.while loop.
+
+     Args:
+         params: the parameters of the kernel, mean, likelihood and inducing point locations.
+         max_iters (int): The maximum number of optimisation steps to run. Defaults
+             to 500.
+         max_linesearch_steps (int): The maximum number of linesearch steps to use
+            for finding the stepsize.Defaults to 32.
+         gtol (float): Terminate the optimisation if the L2 norm of the gradient is
+            below this threshold. Defaults to 1e-8.
+
+     Returns:
+         A new GaussianProcess with the optimized parameters and properties.
+    """
+    vals, static = eqx.partition(model.params, eqx.is_array)
+
+    @jax.jit
+    def loss(vals: Dict) -> Float:
+        params = eqx.combine(vals, static)
+        return -model.log_probability(params)
+
+    # Initialise optimiser
+    optim = optax.lbfgs(
+        linesearch=optax.scale_by_zoom_linesearch(
+            max_linesearch_steps=max_linesearch_steps,
+            initial_guess_strategy="one",
+        )
+    )
+
+    opt_state = optim.init(model.params)
+    loss_value_and_grad = optax.value_and_grad_from_state(loss)
+
+    # Optimisation step.
+    @jax.jit
+    def step(carry):
+        vals, opt_state = carry
+        # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
+        # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
+        loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
+        updates, opt_state = optim.update(
+            loss_gradient,
+            opt_state,
+            vals,
+            value=loss_val,
+            grad=loss_gradient,
+            value_fn=loss,
+        )
+        vals = optax.apply_updates(vals, updates)
+
+        return vals, opt_state
+
+    def continue_fn(carry):
+        _, opt_state = carry
+        n = optax.tree_utils.tree_get(opt_state, "count")
+        g = optax.tree_utils.tree_get(opt_state, "grad")
+        g_l2_norm = optax.tree_utils.tree_norm(g)
+        return (n == 0) | ((n < max_iters) & (g_l2_norm >= gtol))
+
+    # Optimisation loop
+    opt_vals, opt_state = jax.lax.while_loop(
+        continue_fn,
+        step,
+        (vals, opt_state),
+    )
+    final_loss = optax.tree_utils.tree_get(opt_state, "value")
+    final_params = eqx.combine(opt_vals, static)
+
+    cached_choleskys = model.compute_cached_choleskys(final_params)
+
+    return GaussianProcess(
+        model.kernel,
+        model.X,
+        model.y,
+        final_params,
+        mean=model.mean,
+        optimized=True,
+        cached_choleskys=cached_choleskys,
+    )
+
+
+class GaussianProcess(eqx.Module):
+    """An interface for designing a Gaussian Process regression model
+
+    Args:
+        kernel (Kernel): The kernel function
+        X (ArrayLike): The input coordinates. This can be any PyTree that is
+            compatible with ``kernel`` where the zeroth dimension is ``N_data``,
+            the size of the data set.
+        y (ArrayLike): The observed data. This should have the shape
+            ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
+            data provided when instantiating this object.
+        mean (Mean): The mean function.  If not specified, a zero mean will be used.
     """
 
-    log_probability: ArrayLike
-    """The log probability of the conditioned model
+    num_data: int = eqx.field(static=True)
+    dtype: np.dtype = eqx.field(static=True)
+    kernel: Kernel
+    X: ArrayLike
+    y: ArrayLike
+    mean: Mean
+    params: Dict
+    optimized: Bool
+    cached_choleskys: Tuple[ArrayLike, ArrayLike, ArrayLike]
 
-    In other words, this is the marginal likelihood for the kernel parameters,
-    given the observed data, or the multivariate normal log probability
-    evaluated at the given data.
-    """
+    def __init__(
+        self,
+        kernel: Kernel,
+        X: ArrayLike,
+        y: ArrayLike,
+        params: Dict,
+        *,
+        mean: means.Mean | None = None,
+        optimized: Bool | None = None,
+        cached_choleskys: Tuple[ArrayLike, ArrayLike] | None = None,
+    ):
+        self.kernel = kernel
+        self.X = X
+        self.y = y
 
-    gp: GaussianProcess
-    """A :class:`GaussianProcess` describing the conditional distribution
+        if mean:
+            self.mean = mean
+        else:
+            self.mean = ZeroMean
 
-    This will have a mean and covariance conditioned on the observed data, but
-    it is otherwise a fully functional GP that can sample from or condition
-    further (although that's probably not going to be very efficient).
-    """
+        self.num_data = X.shape[0]
+        self.dtype = X.dtype
 
+        self.params = params
+        self.optimized = optimized
 
-def _default_diag(reference: ArrayLike) -> jax.Array:
-    """Default to adding some amount of jitter to the diagonal, just in case,
-    we use sqrt(eps) for the dtype of the mean function because that seems to
-    give sensible results in general.
-    """
-    return jnp.sqrt(jnp.finfo(reference).eps)
+        if cached_choleskys is None:
+            self.cached_choleskys = self.compute_cached_choleskys(self.params)
+        else:
+            self.cached_choleskys = cached_choleskys
+
+    def jitter(self, d, value=1e-6):
+        return jnp.eye(d) * value
+
+    def log_probability(self, params: Dict) -> jax.Array:
+        """Compute the log probability of this multivariate normal
+
+        Args:
+            params (Dict): The hyperparameters of the kernel, mean and likelihood
+
+        Returns:
+            The marginal log probability of this multivariate normal model,
+            evaluated at ``self.y``.
+        """
+
+        kernel = self.kernel(**params["kernel"])
+        mean = self.mean(**params["mean"])
+
+        log_noise = params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+        L_xx = jsp.linalg.cholesky(covariance, lower=True)
+
+        alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
+        S2 = jsp.linalg.cho_solve((L_xx.T, False), alpha)
+
+        # log_likelihood = -0.5 * jnp.einsum("ik,ik->k", self.y, alpha)
+        log_likelihood = -0.5 * jnp.dot(self.y.T, S2)
+        log_likelihood -= jnp.log(jnp.diag(L_xx)).sum()
+        log_likelihood -= 0.5 * self.num_data * jnp.log(2.0 * jnp.pi)
+        return jnp.squeeze(log_likelihood)
+
+    def compute_cached_choleskys(self, params: Dict) -> jax.Array:
+        """Compute the cholesky of the covariance as well as the alpha value.
+
+        Args:
+            params (Dict): The hyperparameters of the kernel, mean and likelihood
+
+        Returns:
+            The cholesky of the covariance as well as K_xx^{-1} y
+        """
+
+        kernel = self.kernel(**params["kernel"])
+        mean = self.mean(**params["mean"])
+
+        log_noise = params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+
+        L_xx = jsp.linalg.cholesky(covariance, lower=True)
+        alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
+
+        return (L_xx, alpha)
+
+    def predict(
+        self,
+        X_test: ArrayLike | None = None,
+    ) -> jax.Array | Tuple[jax.Array, jax.Array]:
+        """Predict the GP model at new test points conditioned on observed data
+
+        Args:
+            X_test (ArrayLike, optional): The coordinates where the prediction
+                should be evaluated. This should have a data type compatible
+                with the ``X`` data provided when instantiating this object. If
+                it is not provided, ``X`` will be used by default, so the
+                predictions will be made.
+        Returns:
+            The mean of the predictive model evaluated at ``X_test``, with shape
+            ``(N_test,)`` where ``N_test`` is the zeroth dimension of
+            ``X_test``. If either ``return_var`` or ``return_cov`` is ``True``,
+            the covariance of the predicted process will also be
+            returned with shape ``(N_test, N_test)``.
+        """
+
+        if not self.optimized:
+            warnings.warn("You are calling predict on an unoptimized gp.")
+
+        kernel = self.kernel(**self.params["kernel"])
+        mean = self.mean(**self.params["mean"])
+
+        log_noise = self.params["likelihood"]["log_diag"]
+        noise = softplus(log_noise)
+        sq_noise = jnp.square(noise)
+
+        L_xx, alpha = self.cached_choleskys
+
+        K_tx = kernel(X_test, self.X)
+        mu_t = mean(X_test)
+
+        y_t = mu_t + jnp.matmul(K_tx, alpha)
+
+        V = jsp.linalg.solve_triangular(L_xx, K_tx.T, lower=True)
+
+        y_cov = (
+            kernel(X_test)
+            - jnp.matmul(V.T, V)
+            + self.jitter(X_test.shape[0], value=sq_noise)
+        )
+
+        return y_t, y_cov
