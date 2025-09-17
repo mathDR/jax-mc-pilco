@@ -79,7 +79,6 @@ control_policy = SumOfGaussians(
     key=key,
 )
 
-
 def train_rollout(
     policy: Controller,
     init_samples: ArrayLike,
@@ -90,25 +89,21 @@ def train_rollout(
     p_params, p_static = eqx.partition(policy, eqx.is_array)
 
     def one_rollout_step(
-        carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float, Float], timestep: Float
-    ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float, Float], Float]:
-        params, key, samples, total_cost, total_std = carry
+        carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float], timestep: Float
+    ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
+        params, key, samples, total_cost = carry
         policy = eqx.combine(params, p_static)
         actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
         samples = model.get_samples(key, samples, actions, 1)
         cost = jnp.mean(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
-        std = jnp.std(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
-        return (params, key, samples, total_cost + cost, total_std + std), cost
+        return (params, key, samples, total_cost + cost), cost
+
 
     total_cost = 0
-    total_std = 0
-    (params, key, samples, total_cost, total_std), result = jax.lax.scan(
-        one_rollout_step,
-        (p_params, key, init_samples, total_cost, total_std),
-        timesteps,
+    (params, key, samples, total_cost), result = jax.lax.scan(
+       one_rollout_step, (p_params, key, init_samples, total_cost), timesteps
     )
-    return total_cost, total_std
-
+    return total_cost
 
 # Main Loop
 
@@ -128,21 +123,11 @@ model_params = [
 states = []
 actions = []
 epsilon = 1e-4
+timesteps=jnp.arange(control_horizon)
 for trial in range(2):
-    if trial == 0:
-        exploration_policy = random_policy
-        num_opt_steps = 2000
-        model_params = model_params
-    else:
-        exploration_policy = control_policy
-        num_opt_steps = 4000
-        model_params = model.params  # Start from previous model (?)
-
+    num_opt_steps = 5
     key, subkey = jr.split(key)
-    these_states, these_actions = sample_from_environment(
-        env, timesteps, num_trials, exploration_policy, subkey
-    )
-
+    these_states, these_actions = sample_from_environment(env, timesteps, num_trials,control_policy, key)
     states.extend(these_states)
     actions.extend(these_actions)
 
@@ -154,62 +139,42 @@ for trial in range(2):
         kernel_funcs=ExpSquared,
         params=model_params,
     )
-    start_time = time.perf_counter()
     model = optimize_imgpr(
         model,
         states=states_array,
         actions=actions_array,
     )
-    end_time = time.perf_counter()
-    print(f"Model Optimization Time = {end_time-start_time}")
 
-    factor = min(1.0, max(0.0, (trial - 5) / 20.0))
-    if factor == 0.0:
-        init_state = [1e-6, 1e-6]  # Cannot use zero because of the reset
-    else:
-        key, subkey = jr.split(key)
-        init_state = [float(factor * jnp.pi * jr.uniform(subkey))]
-        key, subkey = jr.split(key)
-        init_state.extend([float(factor * epsilon * jr.uniform(subkey))])
-
+    init_state = [1e-6, 1e-6]  # Cannot use zero because of the reset
     cosine_decay_scheduler = optax.cosine_decay_schedule(
         0.0001, decay_steps=num_opt_steps, alpha=0.95
     )
 
     optimizer = optax.adam(learning_rate=cosine_decay_scheduler)
-
     sample_train, _ = env.reset(
         options={"x_init": init_state[0], "y_init": init_state[1]}
     )
-    # Generate an initial action
     action_train = control_policy(sample_train, 0.0)
-    # initialize some particles
     key, subkey = jr.split(key)
+
     initial_train_particles = model.get_samples(
         subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
-    key, subkey = jr.split(key)
+
     print(
-        f"Initial cost = {train_rollout(control_policy,initial_train_particles,model,timesteps,subkey)}"
+        f"Initial cost = {train_rollout(control_policy,initial_train_particles,model,timesteps,key)}"
     )
 
-    start_time = time.perf_counter()
-    control_policy, best_loss = fit_controller(
+    new_control_policy, best_loss = fit_controller(
         policy=control_policy,
         env=env,
         num_particles=num_particles,
         initial_state=init_state,
-        timesteps=jnp.arange(control_horizon),
+        timesteps=timesteps,
         gp_model=model,
         obj_func=pendulum_cost,
         optim=optimizer,
         max_steps=num_opt_steps,
-        key=subkey,
+        key=key,
     )
-    end_time = time.perf_counter()
-    print(f"Policy Optimization Time = {end_time-start_time}")
     print(f"Best Loss = {best_loss}")
-    key, subkey = jr.split(key)
-    print(
-        f"Final cost = {train_rollout(control_policy,initial_train_particles,model,timesteps,subkey)}"
-    )

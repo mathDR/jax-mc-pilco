@@ -6,35 +6,18 @@ import equinox.internal as eqxi
 import optax
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, ArrayLike, Float, Int, PyTree
+from jaxtyping import Array, ArrayLike, Bool, Float, Int, PyTree
 from typing import Callable, Tuple
 import jax.random as jr
 import gymnasium
 
-
-def filter_cond(pred, true_fun, false_fun, *operands):
-    dynamic, static = eqx.partition(operands, eqx.is_array)
-
-    def _true_fun(_dynamic):
-        _operands = eqx.combine(_dynamic, static)
-        _out = true_fun(*_operands)
-        _dynamic_out, _static_out = eqx.partition(_out, eqx.is_array)
-        return _dynamic_out, eqxi.Static(_static_out)
-
-    def _false_fun(_dynamic):
-        _operands = eqx.combine(_dynamic, static)
-        _out = false_fun(*_operands)
-        _dynamic_out, _static_out = eqx.partition(_out, eqx.is_array)
-        return _dynamic_out, eqxi.Static(_static_out)
-
-    dynamic_out, static_out = jax.lax.cond(pred, _true_fun, _false_fun, dynamic)
-    return eqx.combine(dynamic_out, static_out.value)
+from jax_mc_pilco.controllers import Controller
 
 
 @eqx.filter_jit
 def fit_controller(  # noqa: PLR0913
     *,
-    policy: eqx.Module,
+    policy: Controller,
     env: gymnasium.wrappers.common.TimeLimit,
     num_particles: Int,
     initial_state: ArrayLike,
@@ -42,12 +25,11 @@ def fit_controller(  # noqa: PLR0913
     gp_model: eqx.Module,
     obj_func: Callable,
     optim: optax.GradientTransformation,
-    key: ArrayLike = jr.PRNGKey(42),
+    key: ArrayLike = jr.key(42),
     max_steps: Int = 100,
     patience: Int = 7,
-    unroll: Int = 5,
     gtol: float = 1e-5,
-) -> Tuple[eqx.Module, Float]:
+) -> Tuple[eqx.Module, eqx.Module, Float]:
     """The optimization loop for fitting the policy parameters."""
 
     sample_train, _ = env.reset(
@@ -60,32 +42,37 @@ def fit_controller(  # noqa: PLR0913
     initial_train_particles = gp_model.get_samples(
         subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
+    key, subkey = jr.split(key)
+    initial_train_particles = gp_model.get_samples(
+        subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
+    )
 
-    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
-
-    @eqx.debug.assert_max_traces(max_traces=1)
+    @eqx.debug.assert_max_traces(max_traces=2)
     def train_rollout(
-        policy_params: ArrayLike,
+        policy: Controller,
         init_samples: ArrayLike,
         model: eqx.Module,
         timesteps: ArrayLike,
-        key: ArrayLike = jr.key(123),
+        key: ArrayLike = jr.key(42),
     ) -> Float:
+        p_params, p_static = eqx.partition(policy, eqx.is_array)
+
         def one_rollout_step(
             carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float], timestep: Float
         ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
-            policy_params, key, samples, total_cost = carry
-            policy = eqx.combine(policy_params, policy_static)
+            params, key, samples, total_cost = carry
+            policy = eqx.combine(params, p_static)
             actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
 
             key, subkey = jr.split(key)
             samples = model.get_samples(subkey, samples, actions, 1)
             cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, actions))))
-            return (policy_params, key, samples, total_cost + cost), cost
+            return (params, key, samples, total_cost + cost), cost
 
         total_cost = 0
-        (policy_params, key, samples, total_cost), result = jax.lax.scan(
-            one_rollout_step, (policy_params, key, init_samples, total_cost), timesteps
+
+        (params, key, samples, total_cost), result = jax.lax.scan(
+            one_rollout_step, (p_params, key, init_samples, total_cost), timesteps
         )
         return total_cost
 
@@ -95,58 +82,70 @@ def fit_controller(  # noqa: PLR0913
 
     def true_fun(arg):
         (
-            policy_params,
-            best_policy_params,
+            params,
+            best_params,
             loss_value,
             iterations_since_improvement,
             best_loss,
         ) = arg
         return (
             loss_value,
-            policy_params,
+            params,
             iterations_since_improvement - iterations_since_improvement,
         )
 
     def false_fun(arg):
         (
-            policy_params,
-            best_policy_params,
+            params,
+            best_params,
             loss_value,
             iterations_since_improvement,
             best_loss,
         ) = arg
-        return best_loss, best_policy_params, iterations_since_improvement + 1
+        return (best_loss, best_params, iterations_since_improvement + 1)
 
-    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
-
-    @eqx.filter_jit
-    def make_step(carry):
+    def make_step(
+        carry: Tuple[
+            ArrayLike,
+            ArrayLike,
+            Int,
+            PyTree,
+            Float,
+            ArrayLike,
+        ]
+    ):
         (
             policy_params,
-            best_policy_params,
+            best_params,
             iterations_since_improvement,
             opt_state,
             best_loss,
+            loss_gradient,
         ) = carry
-
+        policy = eqx.combine(policy_params, policy_static)
         loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(
-            policy_params, initial_train_particles, gp_model, timesteps
+            policy, initial_train_particles, gp_model, timesteps
         )
         updates, opt_state = optim.update(loss_gradient, opt_state, policy_params)
+        policy = eqx.apply_updates(policy, updates)
+        policy_params = eqx.filter(policy, eqx.is_array)
 
+        # best_loss is originally infinite, so we will overwrite it with loss_value if it is.
+        # Otherwise, we return best_loss
         best_loss = jax.lax.cond(
             jnp.isfinite(best_loss),
             lambda z: z[0],
             lambda z: z[1],
             (best_loss, loss_value),
         )
-        best_loss, best_policy_params, iterations_since_improvement = filter_cond(
+
+        best_loss, best_params, iterations_since_improvement = jax.lax.cond(
             loss_value < best_loss,
             true_fun,
             false_fun,
             (
                 policy_params,
-                best_policy_params,
+                best_params,
                 loss_value,
                 iterations_since_improvement,
                 best_loss,
@@ -154,28 +153,35 @@ def fit_controller(  # noqa: PLR0913
         )
         return (
             policy_params,
-            best_policy_params,
+            best_params,
             iterations_since_improvement,
             opt_state,
             best_loss,
+            loss_gradient,
         )
 
-    def continue_fn(carry):
-        _, _, iterations_since_improvement, opt_state, _ = carry
-        # n = optax.tree_utils.tree_get(opt_state, "count")
+    def continue_fn(
+        carry: Tuple[ArrayLike, ArrayLike, Int, PyTree, Float, ArrayLike]
+    ) -> Bool:
+        _, _, iterations_since_improvement, opt_state, _, g = carry
+        # There are two counts:  the adam optimizer and the lr decay scheduler, we
+        # want the former.
         n = optax.tree_utils.tree_get_all_with_path(opt_state, "count")[0][1]
-        g = optax.tree_utils.tree_get(opt_state, "grad")
         g_l2_norm = optax.tree_utils.tree_norm(g)
-        return (
-            False  # (n == 0)
-            | ((n < max_steps) & (g_l2_norm >= gtol))
-            | (iterations_since_improvement > patience)
+
+        return (n == 0) | (
+            ((n < max_steps) & (g_l2_norm >= gtol))
+            & (iterations_since_improvement <= patience)
         )
 
     # Optimisation loop
     best_loss = jnp.inf
+    loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(
+        policy, initial_train_particles, gp_model, timesteps
+    )
     iterations_since_improvement = 0
-    _, best_policy_params, _, _, best_loss = jax.lax.while_loop(
+    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
+    _, best_policy_params, _, _, best_loss, _ = jax.lax.while_loop(
         continue_fn,
         make_step,
         (
@@ -184,6 +190,7 @@ def fit_controller(  # noqa: PLR0913
             iterations_since_improvement,
             opt_state,
             best_loss,
+            loss_gradient,
         ),
     )
 
