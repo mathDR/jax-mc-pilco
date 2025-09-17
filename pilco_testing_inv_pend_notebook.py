@@ -132,7 +132,7 @@ for trial in range(4):
         params = params
     else:
         exploration_policy = control_policy
-        num_opt_steps = 3
+        num_opt_steps = 4
         params = model.params  # Start from previous model (?)
 
     key, subkey = jr.split(key)

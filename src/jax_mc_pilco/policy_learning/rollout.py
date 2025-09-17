@@ -61,16 +61,16 @@ def fit_controller(  # noqa: PLR0913
         subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
 
+    policy_params, policy_static = eqx.partition(policy, eqx.is_array)
+
     @eqx.debug.assert_max_traces(max_traces=1)
     def train_rollout(
-        policy: eqx.Module,
+        policy_params: ArrayLike,
         init_samples: ArrayLike,
         model: eqx.Module,
         timesteps: ArrayLike,
         key: ArrayLike = jr.key(123),
     ) -> Float:
-        policy_params, policy_static = eqx.partition(policy, eqx.is_array)
-
         def one_rollout_step(
             carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float], timestep: Float
         ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
@@ -128,16 +128,11 @@ def fit_controller(  # noqa: PLR0913
             opt_state,
             best_loss,
         ) = carry
-        policy = eqx.combine(policy_params, policy_static)
 
         loss_value, loss_gradient = eqx.filter_value_and_grad(train_rollout)(
-            policy, initial_train_particles, gp_model, timesteps
+            policy_params, initial_train_particles, gp_model, timesteps
         )
-        updates, opt_state = optim.update(
-            loss_gradient, opt_state, eqx.filter(policy, eqx.is_array)
-        )
-
-        policy = eqx.apply_updates(policy, updates)
+        updates, opt_state = optim.update(loss_gradient, opt_state, policy_params)
 
         best_loss = jax.lax.cond(
             jnp.isfinite(best_loss),
@@ -167,13 +162,14 @@ def fit_controller(  # noqa: PLR0913
 
     def continue_fn(carry):
         _, _, iterations_since_improvement, opt_state, _ = carry
-        n = optax.tree_utils.tree_get(opt_state[0], "count")
+        # n = optax.tree_utils.tree_get(opt_state, "count")
+        n = optax.tree_utils.tree_get_all_with_path(opt_state, "count")[0][1]
         g = optax.tree_utils.tree_get(opt_state, "grad")
         g_l2_norm = optax.tree_utils.tree_norm(g)
         return (
-            (n == 0)
+            False  # (n == 0)
             | ((n < max_steps) & (g_l2_norm >= gtol))
-            | (iterations_since_improvement <= patience)
+            | (iterations_since_improvement > patience)
         )
 
     # Optimisation loop
@@ -184,7 +180,7 @@ def fit_controller(  # noqa: PLR0913
         make_step,
         (
             policy_params,
-            policy_params,
+            copy.deepcopy(policy_params),
             iterations_since_improvement,
             opt_state,
             best_loss,
