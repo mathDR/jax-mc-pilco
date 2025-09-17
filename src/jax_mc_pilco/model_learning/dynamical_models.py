@@ -2,6 +2,7 @@
 
 __all__ = ["DynamicalModel", "IMGPR", "IMSGPR", "optimize_imgpr","optimize_imsgpr"]
 
+import time
 from typing import Callable, Dict, List, Tuple, Union
 from jax import Array, config, jit, value_and_grad, vmap
 import equinox as eqx
@@ -313,7 +314,13 @@ def optimize_imsgpr(
     params = []
 
     for i in range(dynamical_model.num_outputs):
+        #print(f"Output {i}:")
+        #breakpoint()
+        #start_time = time.perf_counter()
         model = svgp_fit(dynamical_model.models[i],max_iters=max_iters,max_linesearch_steps=max_linesearch_steps,gtol=gtol)
+        #end_time = time.perf_counter()
+        #print(end_time-start_time)
+        #breakpoint()
         models.append(model)
         params.append(model.params)
     return IMSGPR(
