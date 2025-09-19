@@ -1,19 +1,13 @@
 """ The main model class. """
 
-__all__ = ["DynamicalModel", "IMGPR", "IMSGPR",
-           "optimize_imgpr", "optimize_imsgpr"]
+__all__ = ["DynamicalModel", "IMGPR", "optimize_imgpr"]
 
 from typing import Dict, List, Tuple, Union
 from jax import Array, config, vmap
 import equinox as eqx
 import jax.numpy as jnp
 
-from jax_mc_pilco.model_learning.gp.gaussian_process import (
-    GaussianProcess,
-    gp_fit,
-    SparseVariationalGaussianProcess,
-    svgp_fit,
-)
+from jax_mc_pilco.model_learning.gp.gaussian_process import GaussianProcess, gp_fit
 from jax_mc_pilco.model_learning.gp import Kernel, Mean, ZeroMean
 import jax.random as jr
 from jaxtyping import ArrayLike, Bool, Float, Int
@@ -41,7 +35,7 @@ class DynamicalModel(eqx.Module):
     input_dimension: Int
     num_datapoints: Int
     params: List[Dict[str, Union[Dict[str, ArrayLike], ArrayLike]]]
-    models: List[Union[GaussianProcess, SparseVariationalGaussianProcess]]
+    models: List[GaussianProcess]
     name: str | None
 
     def __init__(
@@ -52,14 +46,10 @@ class DynamicalModel(eqx.Module):
         params: Dict[str, Union[Dict[str, ArrayLike], ArrayLike]],
         *,
         mean_funcs: List[Mean] | Mean | None = None,
-        models: List[
-            Union[GaussianProcess, SparseVariationalGaussianProcess]
-            ] | None = None,
+        models: List[GaussianProcess] | None = None,
         name: str | None = None,
     ) -> None:
-        io_data = self.data_to_gp_input_output(
-            states, actions
-        )
+        io_data = self.data_to_gp_input_output(states, actions)
         self.training_data, self.training_outputs = io_data
 
         self.num_outputs: Int = self.training_outputs.shape[1]
@@ -90,17 +80,11 @@ class DynamicalModel(eqx.Module):
 
     def data_to_gp_output(self, states: ArrayLike) -> Array:
         """Transforms data into PILCO data format."""
-        val = jnp.diff(states, n=1, axis=0)
-        if val.ndim == 1:
-            val = jnp.atleast_2d(val).T
-        return val
+        return jnp.diff(states, n=1, axis=0)
 
     def data_to_gp_input(self, states: ArrayLike, actions: ArrayLike) -> Array:
         """Transforms data into PILCO data format."""
-        val = jnp.hstack((states, actions))
-        if val.ndim == 1:
-            val = jnp.atleast_2d(val).T
-        return val
+        return jnp.hstack((states, actions))
 
     def data_to_gp_input_output(
         self, states: ArrayLike, actions: ArrayLike
@@ -108,23 +92,20 @@ class DynamicalModel(eqx.Module):
         """Transforms data into PILCO data format."""
         return (
             self.data_to_gp_input(states, actions)[:-1, :],
-            self.data_to_gp_output(states)
+            self.data_to_gp_output(states),
         )
 
     def create_models(
         self,
         params: List[Dict[str, float]],
-    ) -> List[Union[GaussianProcess, SparseVariationalGaussianProcess]]:
+    ) -> List[GaussianProcess]:
         """Create the models for each output dimension.
         Following https://docs.kidger.site/equinox/tricks/#ensembling
         """
         raise NotImplementedError()
 
     @eqx.filter_jit
-    def predict_all_outputs(
-        self,
-        test_inputs: ArrayLike
-    ) -> Tuple[Array, Array]:
+    def predict_all_outputs(self, test_inputs: ArrayLike) -> Tuple[Array, Array]:
         """
         Return the gp ouputs (mean and variance) for each output dimension for
           each test input
@@ -143,7 +124,7 @@ class DynamicalModel(eqx.Module):
         predictive_vars = []
         for i in range(self.num_outputs):
             mu, cov = self.models[i].predict(test_inputs)
-            predictive_means.append(mu+test_inputs[:, i])
+            predictive_means.append(mu + test_inputs[:, i])
             predictive_vars.append(cov)
         predictive_moments = jnp.dstack(
             (
@@ -155,11 +136,7 @@ class DynamicalModel(eqx.Module):
 
     @eqx.filter_jit
     def get_samples(
-        self,
-        key: ArrayLike,
-        states: ArrayLike,
-        actions: ArrayLike,
-        num_samples: Int
+        self, key: ArrayLike, states: ArrayLike, actions: ArrayLike, num_samples: Int
     ) -> Array:
         # Function to sample from a single mean and covariance
         def sample_mvnormal(key, mean, cov, num_samples):
@@ -200,9 +177,7 @@ class IMGPR(DynamicalModel):
         params: Dict[str, Union[Dict[str, ArrayLike], ArrayLike]],
         *,
         mean_funcs: List[Mean] | Mean | None = None,
-        models: List[
-            Union[GaussianProcess, SparseVariationalGaussianProcess]
-            ] | None = None,
+        models: List[GaussianProcess] | None = None,
         name: str | None = None,
     ) -> None:
         super().__init__(
@@ -212,15 +187,15 @@ class IMGPR(DynamicalModel):
             params,
             mean_funcs=mean_funcs,
             models=models,
-            name=name
-            )
+            name=name,
+        )
 
     def build_gp(
-            self,
-            output_gp_index: Int,
-            param: Dict[str, Union[Dict[str, Float], Float]],
-            optimized: Bool
-            ) -> GaussianProcess:
+        self,
+        output_gp_index: Int,
+        param: Dict[str, Union[Dict[str, Float], Float]],
+        optimized: Bool,
+    ) -> GaussianProcess:
         """Constructs a GP from the parameter Dict."""
         return GaussianProcess(
             self.kernel[output_gp_index],
@@ -236,7 +211,7 @@ class IMGPR(DynamicalModel):
         params: List[Dict[str, Union[Dict[str, ArrayLike], ArrayLike]]],
     ) -> List[GaussianProcess]:
         """Create GP models.  We should be able to use equinox ensembling and
-           vmap to build all of these, but that is left for a TODO.
+        vmap to build all of these, but that is left for a TODO.
         """
 
         # @partial(vmap,in_axes=(1,0))
@@ -249,91 +224,9 @@ class IMGPR(DynamicalModel):
         # return make_model(self.training_outputs, params)
 
         return [
-            self.build_gp(
-                i,
-                params[i],
-                optimized=False
-                ) for i in range(self.num_outputs)
-            ]
-
-
-class IMSGPR(DynamicalModel):
-    """The forward model of the system dynamics.
-
-    Independent Multiple Sparse Gaussian Process regression - has an
-      independent Sparse GP for every output dimension
-
-    Args:
-        kernel (Kernel): The kernel function
-        data (JAXArray): The input data. This is either state-action pairs
-            $(x_t, u_t)$, or (extension) will be observable-action pairs
-            $(y_t, u_t).$
-    """
-
-    num_inducing_points: Int
-
-    def __init__(
-        self,
-        states: ArrayLike,
-        actions: ArrayLike,
-        kernel_funcs: Kernel,
-        num_inducing_points: Int,
-        params: Dict[str, Union[Dict[str, ArrayLike], ArrayLike]],
-        *,
-        mean_funcs: List[Mean] | Mean | None = None,
-        models: List[
-            Union[GaussianProcess, SparseVariationalGaussianProcess]
-            ] | None = None,
-        name: str | None = None,
-    ) -> None:
-        self.num_inducing_points = num_inducing_points
-        super().__init__(
-            states,
-            actions,
-            kernel_funcs,
-            params,
-            mean_funcs=mean_funcs,
-            models=models,
-            name=name
-            )
-
-    def build_gp(
-            self,
-            output_gp_index: Int,
-            param: Dict[str, Union[Dict[str, Float], Float]],
-            optimized: Bool
-            ) -> SparseVariationalGaussianProcess:
-        """Constructs a GP from the parameter Dict."""
-        return SparseVariationalGaussianProcess(
-            self.kernel[output_gp_index],
-            self.training_data,
-            self.training_outputs[:, output_gp_index],
-            self.num_inducing_points,
-            param,
-            mean=self.mean[output_gp_index],
-            optimized=optimized,
-        )
-
-    def create_models(
-        self,
-        params: List[Dict[str, Union[Dict[str, ArrayLike], ArrayLike]]],
-    ) -> List[SparseVariationalGaussianProcess]:
-        """Create Sparse GP models using params list"""
-
-        # @partial(vmap,in_axes=(1,0))
-        # def make_model(
-        #   y: ArrayLike,
-        #   param: Dict[str, Union[Dict[str,Float],Float]]
-        # )->SparseVariationalGaussianProcess:
-        #    return self.build_gp(y, param, optimized=False)
-        # return make_model(self.training_outputs, params)
-
-        return [
-            self.build_gp(
-                i,
-                params[i],
-                optimized=False
-                ) for i in range(self.num_outputs)]
+            self.build_gp(i, params[i], optimized=False)
+            for i in range(self.num_outputs)
+        ]
 
 
 def optimize_imgpr(
@@ -343,7 +236,7 @@ def optimize_imgpr(
     *,
     max_iters: int = 500,
     max_linesearch_steps: int = 32,
-    gtol: float = 1e-5
+    gtol: float = 1e-5,
 ) -> IMGPR:
     """Optimize the imgpr dynamical model and return a new instance."""
     models = []
@@ -353,8 +246,8 @@ def optimize_imgpr(
             dynamical_model.models[i],
             max_iters=max_iters,
             max_linesearch_steps=max_linesearch_steps,
-            gtol=gtol
-            )
+            gtol=gtol,
+        )
         models.append(model)
         params.append(model.params)
 
@@ -362,40 +255,6 @@ def optimize_imgpr(
         states=states,
         actions=actions,
         kernel_funcs=dynamical_model.kernel,
-        params=params,
-        mean_funcs=dynamical_model.mean,
-        models=models,
-        name=dynamical_model.name,
-    )
-
-
-def optimize_imsgpr(
-    dynamical_model: IMSGPR,
-    states: ArrayLike,
-    actions: ArrayLike,
-    *,
-    max_iters: int = 500,
-    max_linesearch_steps: int = 32,
-    gtol: float = 1e-5,
-) -> IMSGPR:
-    """Optimize the imgpr dynamical model and return a new instance."""
-    models = []
-    params = []
-
-    for i in range(dynamical_model.num_outputs):
-        model = svgp_fit(
-            dynamical_model.models[i],
-            max_iters=max_iters,
-            max_linesearch_steps=max_linesearch_steps,
-            gtol=gtol
-            )
-        models.append(model)
-        params.append(model.params)
-    return IMSGPR(
-        states=states,
-        actions=actions,
-        kernel_funcs=dynamical_model.kernel,
-        num_inducing_points=dynamical_model.num_inducing_points,
         params=params,
         mean_funcs=dynamical_model.mean,
         models=models,
