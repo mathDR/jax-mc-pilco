@@ -11,7 +11,9 @@ import jax.random as jr
 from jaxtyping import ArrayLike, Float
 from typing import Tuple
 
-from jax_mc_pilco.controllers import Controller, RandomController, SumOfGaussians
+from jax_mc_pilco.controllers import (
+    Controller, RandomController, SumOfGaussians
+)
 from jax_mc_pilco.rewards import pendulum_cost  # , cart_pole_cost
 from jax_mc_pilco.model_learning.dynamical_models import (
     IMGPR,
@@ -45,13 +47,22 @@ x, _ = env.reset()
 state_dim = x.shape[0]
 # state is cos_theta, sin_theta, theta_dot
 
-timesteps = np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1)
+timesteps = np.linspace(
+    0,
+    T_exploration,
+    int(T_exploration / sim_timestep) + 1
+)
 # Initialize the Controllers
 
 key = jr.key(42)
 
-random_policy = RandomController(state_dim, action_dim, to_squash=True, max_action=umax)
-
+random_policy = RandomController(
+    state_dim,
+    action_dim,
+    to_squash=True,
+    max_action=umax
+)
+key, subkey = jr.split(key)
 control_policy = SumOfGaussians(
     state_dim,
     action_dim,
@@ -60,7 +71,7 @@ control_policy = SumOfGaussians(
     initial_centers=None,
     to_squash=True,
     max_action=umax,
-    key=key,
+    key=subkey,
 )
 
 
@@ -81,7 +92,9 @@ def policy_rollout_with_std(
         policy = eqx.combine(params, p_static)
         actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
         samples = model.get_samples(key, samples, actions, 1)
-        cost = jnp.mean(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
+        cost = jnp.mean(
+            jax.vmap(pendulum_cost)(jnp.hstack((samples, actions)))
+            )
         var = jnp.var(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
         return (params, key, samples, total_cost + cost, total_var + var), cost
 
@@ -149,7 +162,7 @@ for trial in range(num_trials):
     print(f"Model Optimization Time = {end_time-start_time}")
 
     # Set up Optimizer for Policy Optimization
-    factor = min(1.0, max(0.0, (trial - 5) / 20.0))
+    factor = min(1.0, max(0.0, (trial - 5) / 20))
     if factor == 0.0:
         init_state = [1e-6, 1e-6]  # Cannot use zero because of the reset
     else:
@@ -171,7 +184,10 @@ for trial in range(num_trials):
     key, subkey = jr.split(key)
 
     initial_train_particles = model.get_samples(
-        subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
+        subkey,
+        jnp.array([sample_train]),
+        jnp.array([action_train]),
+        num_particles
     )
 
     # Compute cost

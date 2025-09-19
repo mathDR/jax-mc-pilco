@@ -2,22 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Tuple
 
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
 from jax import Array
-from jax.typing import ArrayLike
-from jaxtyping import Float, Int
-
-
-import warnings
-
-import jax.lax as lax
-import jax.numpy as jnp
-import jax.random as jrandom
-from jaxtyping import Array, PRNGKeyArray
+from jaxtyping import ArrayLike, Bool, Float, Int
 
 
 class Controller(eqx.Module):
@@ -54,7 +45,9 @@ class Controller(eqx.Module):
         params: ArrayLike,
         time_for_action: Float,
     ) -> Array:
-        """Generate an action from the controller in state `state` at time `time_for_action`."""
+        """Generate an action from the controller in state `state` at time
+        `time_for_action`.
+        """
         raise NotImplementedError()
 
     def squashing(self, action: ArrayLike) -> Array:
@@ -85,7 +78,7 @@ class RandomController(Controller):
         self,
         state: ArrayLike,
         time_for_action: Float,
-        key: Optional[ArrayLike] = None,
+        key: ArrayLike | None = None,
     ) -> Array:
         """
         Simple random action
@@ -123,7 +116,7 @@ class LinearPolicy(Controller):
         action_dim: Int,
         to_squash: bool = False,
         max_action: Float = 1.0,
-        key: Optional[ArrayLike] = None,
+        key: ArrayLike | None = None,
     ):
         super().__init__(
             state_dim,
@@ -149,10 +142,11 @@ class LinearPolicy(Controller):
         self,
         state_mean: ArrayLike,
         time_for_action: Float,
-        key: Optional[ArrayLike] = None,
+        key: ArrayLike | None = None,
     ) -> Tuple[Array, Array]:
         """
-        Predict Gaussian distribution for action given a state distribution input
+        Predict Gaussian distribution for action given a state distribution
+          input
         :param params: concatenated weight matrix and offset
         :param m: mean of the state
         :return: mean (M) of action
@@ -166,7 +160,8 @@ class LinearPolicy(Controller):
 
 class SumOfSinusoids(Controller):
     """
-    Exploration policy: sum of 'num_sin' sinusoids with random amplitudes and frequencies
+    Exploration policy: sum of 'num_sin' sinusoids with random amplitudes and
+    frequencies.
     """
 
     num_sin: Int
@@ -185,7 +180,7 @@ class SumOfSinusoids(Controller):
         amplitude_max: ArrayLike,
         to_squash: bool = False,
         max_action: Float = 1.0,
-        key: Optional[ArrayLike] = None,
+        key: ArrayLike | None = None,
     ):
         super().__init__(
             state_dim,
@@ -252,22 +247,22 @@ class SumOfGaussians(Controller):
     log_lengthscales: ArrayLike
     centers: ArrayLike
     f_linear: eqx.nn.Linear
-    scale_factor: Optional[ArrayLike]
+    scale_factor: ArrayLike | None
 
     def __init__(
         self,
         state_dim: int,
         action_dim: int,
         num_basis: int,
-        initial_log_lengthscales: Optional[ArrayLike] = None,
-        initial_centers: Optional[ArrayLike] = None,
+        initial_log_lengthscales: ArrayLike | None = None,
+        initial_centers: ArrayLike | None = None,
         centers_init_min: Float = -1.0,
         centers_init_max: Float = 1.0,
         use_bias: bool = True,
-        scale_factor: Optional[ArrayLike] = None,
-        to_squash: bool = False,
+        scale_factor: ArrayLike | None = None,
+        to_squash: Bool = False,
         max_action: Float = 1.0,
-        key: Optional[ArrayLike] = None,
+        key: ArrayLike | None = None,
     ):
         super().__init__(
             state_dim,
@@ -310,8 +305,8 @@ class SumOfGaussians(Controller):
     def __call__(
         self,
         states: ArrayLike,
-        timestep: Optional[Float] = None,
-        key: Optional[ArrayLike] = None,
+        timestep: Float | None = None,
+        key: ArrayLike | None = None,
     ) -> Array:
         """
         Returns a linear combination of gaussian functions
@@ -323,7 +318,8 @@ class SumOfGaussians(Controller):
         # get the lengthscales from log
         lengthscales = jnp.exp(self.log_lengthscales)
 
-        # Need to "inflate" the state to make the angle into trig functioned version
+        # Need to "inflate" the state to make the angle into trig functioned
+        # version
         states = states.reshape([-1, self.state_dim])
 
         # normalize new_states and centers

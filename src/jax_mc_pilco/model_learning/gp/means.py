@@ -1,7 +1,7 @@
 """The mean function classes."""
 
 from __future__ import annotations
-
+from jaxtyping import Float
 __all__ = [
     "Mean",
     "CustomMean",
@@ -15,7 +15,7 @@ __all__ = [
 from abc import abstractmethod
 from jaxtyping import ArrayLike
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 import equinox as eqx
 import jax
@@ -52,26 +52,26 @@ class Mean(eqx.Module):
 
     def __add__(self, other: Mean | ArrayLike) -> Mean:
         if isinstance(other, Mean):
-            return Sum(self, other)
-        return Sum(self, Constant(other))
+            return SumMean(self, other)
+        return SumMean(self, ConstantMean(other))
 
     def __radd__(self, other: Any) -> Mean:
         # We'll hit this first branch when using the `sum` function
         if other == 0:
             return self
         if isinstance(other, Mean):
-            return Sum(other, self)
-        return Sum(Constant(other), self)
+            return SumMean(other, self)
+        return SumMean(ConstantMean(other), self)
 
     def __mul__(self, other: Mean | ArrayLike) -> Mean:
         if isinstance(other, Mean):
-            return Product(self, other)
-        return Product(self, Constant(other))
+            return ProductMean(self, other)
+        return ProductMean(self, ConstantMean(other))
 
     def __rmul__(self, other: Any) -> Mean:
         if isinstance(other, Mean):
-            return Product(other, self)
-        return Product(Constant(other), self)
+            return ProductMean(other, self)
+        return ProductMean(ConstantMean(other), self)
 
 
 class ZeroMean(Mean):
@@ -125,7 +125,9 @@ class LinearMean(Mean):
 
     def evaluate(self, X: ArrayLike) -> jax.Array:
         if jnp.ndim(self.value) != 2:
-            raise ValueError("The value of a linear mean must have two elements")
+            raise ValueError(
+                "The value of a linear mean must have two elements"
+                )
         return jnp.asarray(self.value[0] + self.value[1] * X)
 
 

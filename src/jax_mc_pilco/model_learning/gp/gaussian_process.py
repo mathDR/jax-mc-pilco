@@ -2,16 +2,8 @@ from __future__ import annotations
 
 __all__ = ["GaussianProcess", "SparseVariationalGaussianProcess"]
 
-from collections.abc import Sequence
-from functools import partial
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    NamedTuple,
-)
-from jaxtyping import ArrayLike
-
+from jaxtyping import ArrayLike, Bool, Float
+from typing import Dict, Tuple, Union
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -22,9 +14,6 @@ import jax.scipy as jsp
 
 from jax_mc_pilco.model_learning.gp.kernels.base import Kernel
 from jax_mc_pilco.model_learning.gp.means import ZeroMean, Mean
-
-if TYPE_CHECKING:
-    from jax_mc_pilco.model_learning.gp.numpyro_support import TinyDistribution
 
 
 def softplus(X: ArrayLike) -> jax.Array:
@@ -38,21 +27,24 @@ def svgp_fit(
     max_linesearch_steps: int = 32,
     gtol: float = 1e-5,
 ) -> SparseVariationalGaussianProcess:
-    r"""Maximize the collapsed expected lower bound (ELBO) for the given SparseVariationalGaussianProcess
+    r"""Maximize the collapsed expected lower bound (ELBO) for the given
+    SparseVariationalGaussianProcess.
 
     Uses Optax's LBFGS implementation and a jax.lax.while loop.
 
      Args:
-         params: the parameters of the kernel, mean, likelihood and inducing point locations.
-         max_iters (int): The maximum number of optimisation steps to run. Defaults
-             to 500.
-         max_linesearch_steps (int): The maximum number of linesearch steps to use
-            for finding the stepsize.Defaults to 32.
-         gtol (float): Terminate the optimisation if the L2 norm of the gradient is
-            below this threshold. Defaults to 1e-8.
+         params: the parameters of the kernel, mean, likelihood and inducing
+         point locations.
+         max_iters (int): The maximum number of optimisation steps to run.
+            Defaults to 500.
+         max_linesearch_steps (int): The maximum number of linesearch steps to
+            use for finding the stepsize.Defaults to 32.
+         gtol (float): Terminate the optimisation if the L2 norm of the
+            gradient is below this threshold. Defaults to 1e-8.
 
      Returns:
-         A new SparseVariationalGaussianProcess with the optimized parameters and properties.
+         A new SparseVariationalGaussianProcess with the optimized parameters
+            and properties.
     """
     vals, static = eqx.partition(model.params, eqx.is_array)
 
@@ -76,8 +68,10 @@ def svgp_fit(
     @jax.jit
     def step(carry):
         vals, opt_state = carry
-        # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
-        # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
+        # Using optax's value_and_grad_from_state is more efficient given
+        # LBFGS uses a linesearch
+        # See
+        # https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
         loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
         updates, opt_state = optim.update(
             loss_gradient,
@@ -104,7 +98,6 @@ def svgp_fit(
         step,
         (vals, opt_state),
     )
-    final_loss = optax.tree_utils.tree_get(opt_state, "value")
     final_params = eqx.combine(opt_vals, static)
 
     cached_choleskys = model.compute_cached_choleskys(final_params)
@@ -127,10 +120,10 @@ class SparseVariationalGaussianProcess(eqx.Module):
     Args:
         kernel (Kernel): The kernel function
         X (ArrayLike): The input coordinates. This can be any PyTree that is
-            compatible with ``kernel`` where the zeroth dimension is ``N_data``,
+            compatible with ``kernel`` where the 0th dimension is ``N_data``,
             the size of the data set.
         y (ArrayLike): The observed data. This should have the shape
-            ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
+            ``(N_data,)``, where ``N_data`` was the 0th axis of the ``X``
             data provided when instantiating this object.
         num_inducing_points (int): the number of inducing points.
         mean (Mean): The mean function that will be evaluated with the ``X``
@@ -186,7 +179,7 @@ class SparseVariationalGaussianProcess(eqx.Module):
     def collapsed_elbo(
         self,
         params: Dict[str, float],
-    ) -> Union[float, Float[jax.Array, ""]]:
+    ) -> Union[float, Float[jax.Array]]:
         log_noise = params["likelihood"]["log_diag"]
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
@@ -215,7 +208,8 @@ class SparseVariationalGaussianProcess(eqx.Module):
         ) / sq_noise
 
         two_log_prob = (
-            -self.num_data * jnp.log(2.0 * jnp.pi * sq_noise) - log_det_B - quad
+            -self.num_data * jnp.log(2.0 * jnp.pi * sq_noise) -
+            log_det_B - quad
         )
         two_trace = jnp.sum(Kxx_diag) / sq_noise - jnp.trace(AAT)
 
@@ -229,7 +223,6 @@ class SparseVariationalGaussianProcess(eqx.Module):
 
         log_noise = params["likelihood"]["log_diag"]
         noise = softplus(log_noise)
-        sq_noise = jnp.square(noise)
 
         z = params["inducing_point_locations"]
         kernel = self.kernel(**params["kernel"])
@@ -254,7 +247,10 @@ class SparseVariationalGaussianProcess(eqx.Module):
             (L_AAT, True), jnp.matmul(Lz_inv_Kzx, diff)
         )
 
-        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve((L_z.T, False), Lz_inv_Kzx_diff)
+        Kzz_inv_Kzx_diff = jsp.linalg.cho_solve(
+            (L_z.T, False),
+            Lz_inv_Kzx_diff
+            )
 
         return (L_z, L_AAT, Kzz_inv_Kzx_diff)
 
@@ -262,8 +258,8 @@ class SparseVariationalGaussianProcess(eqx.Module):
         self,
         X_test: ArrayLike | None = None,
     ) -> jax.Array | Tuple[jax.Array, jax.Array]:
-        """Predict the GP model at new test points conditioned on observed data.
-           This method caches the intermediate
+        """Predict the GP model at new test points conditioned on observed
+            data.
 
         Args:
             X_test (ArrayLike, optional): The coordinates where the prediction
@@ -273,9 +269,9 @@ class SparseVariationalGaussianProcess(eqx.Module):
                 predictions will be made.
 
         Returns:
-            The mean and covariance of the predictive model evaluated at ``X_test``, with shape
-            ``(N_test,)`` and ``(N_test, N_test)`` where ``N_test`` is the zeroth dimension of
-            ``X_test``.
+            The mean and covariance of the predictive model evaluated at
+            ``X_test``, with shape ``(N_test,)`` and ``(N_test, N_test)``
+            where ``N_test`` is the zeroth dimension of ``X_test``.
         """
 
         # Compute mu and Covariance
@@ -290,7 +286,6 @@ class SparseVariationalGaussianProcess(eqx.Module):
         kernel = self.kernel(**self.params["kernel"])
 
         mean = self.mean(**self.params["mean"])
-        mu = mean(self.X)
 
         L_z, L_AAT, Kzz_inv_Kzx_diff = self.cached_choleskys
 
@@ -326,13 +321,14 @@ def gp_fit(
     Uses Optax's LBFGS implementation and a jax.lax.while loop.
 
      Args:
-         params: the parameters of the kernel, mean, likelihood and inducing point locations.
-         max_iters (int): The maximum number of optimisation steps to run. Defaults
-             to 500.
-         max_linesearch_steps (int): The maximum number of linesearch steps to use
-            for finding the stepsize.Defaults to 32.
-         gtol (float): Terminate the optimisation if the L2 norm of the gradient is
-            below this threshold. Defaults to 1e-8.
+         params: the parameters of the kernel, mean, likelihood and inducing
+            point locations.
+         max_iters (int): The maximum number of optimisation steps to run.
+            Defaults to 500.
+         max_linesearch_steps (int): The maximum number of linesearch steps to
+            use for finding the stepsize.Defaults to 32.
+         gtol (float): Terminate the optimisation if the L2 norm of the
+            gradient is below this threshold. Defaults to 1e-8.
 
      Returns:
          A new GaussianProcess with the optimized parameters and properties.
@@ -342,7 +338,7 @@ def gp_fit(
     @jax.jit
     def loss(vals: Dict) -> Float:
         params = eqx.combine(vals, static)
-        return -model.log_probability(params)
+        return -model.log_likelihood(params)
 
     # Initialise optimiser
     optim = optax.lbfgs(
@@ -359,8 +355,10 @@ def gp_fit(
     @jax.jit
     def step(carry):
         vals, opt_state = carry
-        # Using optax's value_and_grad_from_state is more efficient given LBFGS uses a linesearch
-        # See https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
+        # Using optax's value_and_grad_from_state is more efficient given
+        # LBFGS uses a linesearch
+        # See
+        # https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
         loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
         updates, opt_state = optim.update(
             loss_gradient,
@@ -387,7 +385,6 @@ def gp_fit(
         step,
         (vals, opt_state),
     )
-    final_loss = optax.tree_utils.tree_get(opt_state, "value")
     final_params = eqx.combine(opt_vals, static)
 
     cached_choleskys = model.compute_cached_choleskys(final_params)
@@ -409,12 +406,13 @@ class GaussianProcess(eqx.Module):
     Args:
         kernel (Kernel): The kernel function
         X (ArrayLike): The input coordinates. This can be any PyTree that is
-            compatible with ``kernel`` where the zeroth dimension is ``N_data``,
+            compatible with ``kernel`` where the zeroth dimension is ``N_data``
             the size of the data set.
         y (ArrayLike): The observed data. This should have the shape
             ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
             data provided when instantiating this object.
-        mean (Mean): The mean function.  If not specified, a zero mean will be used.
+        mean (Mean): The mean function.  If not specified, a zero mean will be
+            used.
     """
 
     num_data: int = eqx.field(static=True)
@@ -434,7 +432,7 @@ class GaussianProcess(eqx.Module):
         y: ArrayLike,
         params: Dict,
         *,
-        mean: means.Mean | None = None,
+        mean: Mean | None = None,
         optimized: Bool | None = None,
         cached_choleskys: Tuple[ArrayLike, ArrayLike] | None = None,
     ):
@@ -461,14 +459,15 @@ class GaussianProcess(eqx.Module):
     def jitter(self, d, value=1e-6):
         return jnp.eye(d) * value
 
-    def log_probability(self, params: Dict) -> jax.Array:
-        """Compute the log probability of this multivariate normal
+    def log_likelihood(self, params: Dict) -> jax.Array:
+        """Compute the log likelihood of this multivariate normal
 
         Args:
-            params (Dict): The hyperparameters of the kernel, mean and likelihood
+            params (Dict): The hyperparameters of the kernel, mean and
+                likelihood
 
         Returns:
-            The marginal log probability of this multivariate normal model,
+            The marginal log likelihood of this multivariate normal model,
             evaluated at ``self.y``.
         """
 
@@ -479,10 +478,13 @@ class GaussianProcess(eqx.Module):
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+        covariance = (
+            kernel(self.X, self.X) +
+            self.jitter(self.num_data, value=sq_noise)
+        )
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
 
-        alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
+        alpha = jsp.linalg.cho_solve((L_xx, True), self.y-mean(self.X))
         S2 = jsp.linalg.cho_solve((L_xx.T, False), alpha)
 
         # log_likelihood = -0.5 * jnp.einsum("ik,ik->k", self.y, alpha)
@@ -495,7 +497,8 @@ class GaussianProcess(eqx.Module):
         """Compute the cholesky of the covariance as well as the alpha value.
 
         Args:
-            params (Dict): The hyperparameters of the kernel, mean and likelihood
+            params (Dict): The hyperparameters of the kernel, mean,
+              and likelihood
 
         Returns:
             The cholesky of the covariance as well as K_xx^{-1} y
@@ -508,10 +511,12 @@ class GaussianProcess(eqx.Module):
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+        covariance = (
+            kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+        )
 
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
-        alpha = jsp.linalg.cho_solve((L_xx, True), self.y)
+        alpha = jsp.linalg.cho_solve((L_xx, True), self.y-mean(self.X))
 
         return (L_xx, alpha)
 
@@ -528,8 +533,8 @@ class GaussianProcess(eqx.Module):
                 it is not provided, ``X`` will be used by default, so the
                 predictions will be made.
         Returns:
-            The mean of the predictive model evaluated at ``X_test``, with shape
-            ``(N_test,)`` where ``N_test`` is the zeroth dimension of
+            The mean of the predictive model evaluated at ``X_test``, with
+            shape ``(N_test,)`` where ``N_test`` is the zeroth dimension of
             ``X_test``. If either ``return_var`` or ``return_cov`` is ``True``,
             the covariance of the predicted process will also be
             returned with shape ``(N_test, N_test)``.

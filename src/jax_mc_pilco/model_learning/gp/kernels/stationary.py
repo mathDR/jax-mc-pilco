@@ -30,7 +30,7 @@ __all__ = [
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-
+from jax import Array
 from jax_mc_pilco.model_learning.gp.kernels.base import Kernel, softplus
 from jax_mc_pilco.model_learning.gp.kernels.distance import (
     Distance,
@@ -57,10 +57,10 @@ class Stationary(Kernel):
             ``distance`` isn't provided.
     """
 
-    coefficient: jax.Array | float = eqx.field(
+    coefficient: Array | float = eqx.field(
         default_factory=lambda: jnp.ones(())
     )
-    log_scale: jax.Array | float = eqx.field(default_factory=lambda: jnp.zeros(()))
+    log_scale: Array | float = eqx.field(default_factory=lambda: jnp.zeros(()))
     distance: Distance = eqx.field(default_factory=L1Distance)
 
 
@@ -81,7 +81,7 @@ class Exp(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         if jnp.ndim(self.log_scale):
             raise ValueError(
                 "Only scalar scales are permitted for stationary kernels; use"
@@ -111,7 +111,7 @@ class ExpSquared(Stationary):
 
     distance: Distance = eqx.field(default_factory=L2Distance)
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(
             softplus(self.log_scale)
         )
@@ -135,10 +135,10 @@ class Matern32(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         r = self.distance.distance(X1, X2) / softplus(self.log_scale)
         arg = np.sqrt(3) * r
-        return self.coefficient * j(1 + arg) * jnp.exp(-arg)
+        return self.coefficient * (1. + arg) * jnp.exp(-arg)
 
 
 class Matern52(Stationary):
@@ -159,12 +159,12 @@ class Matern52(Stationary):
         scale: The parameter :math:`\ell`.
     """
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         r = self.distance.distance(X1, X2) / softplus(self.log_scale)
         arg = np.sqrt(5) * r
         return (
             self.coefficient
-            * j(1 + arg + jnp.square(arg) / 3)
+            * (1. + arg + jnp.square(arg) / 3.)
             * jnp.exp(-arg)
         )
 
@@ -186,9 +186,9 @@ class Cosine(Stationary):
         scale: The parameter :math:`P`.
     """
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         r = self.distance.distance(X1, X2) / softplus(self.log_scale)
-        return self.coefficient * jjnp.cos(2 * jnp.pi * r)
+        return self.coefficient * jnp.cos(2 * jnp.pi * r)
 
 
 class ExpSineSquared(Stationary):
@@ -209,16 +209,16 @@ class ExpSineSquared(Stationary):
         gamma: The parameter :math:`\Gamma`.
     """
 
-    gamma: jax.Array | float | None = None
+    gamma: Array | float | None = None
 
     def __check_init__(self):
         if self.gamma is None:
             raise ValueError("Missing required argument 'gamma'")
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         assert self.gamma is not None
         r = self.distance.distance(X1, X2) / softplus(self.log_scale)
-        return self.coefficient * jjnp.exp(
+        return self.coefficient * jnp.exp(
             -self.gamma * jnp.square(jnp.sin(jnp.pi * r))
         )
 
@@ -241,20 +241,20 @@ class RationalQuadratic(Stationary):
         alpha: The parameter :math:`\alpha`.
     """
 
-    alpha: jax.Array | float | None = None
+    alpha: Array | float | None = None
 
     def __check_init__(self):
         if self.alpha is None:
             raise ValueError("Missing required argument 'alpha'")
 
-    def evaluate(self, X1: jax.Array, X2: jax.Array) -> jax.Array:
+    def evaluate(self, X1: Array, X2: Array) -> Array:
         assert self.alpha is not None
         r2 = self.distance.squared_distance(X1, X2) / jnp.square(
             softplus(self.log_scale)
         )
         return (
             self.coefficient
-            * j(1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
+            * (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
         )
 
 
@@ -263,7 +263,9 @@ class SpectralMixture(Stationary):
 
     .. math::
 
-        k(\mathbf{x}_i,\,\mathbf{x}_j) = \sum_{q=1}{Q}w_q\prod_{n=1}{N}\exp\(-2\pi^2r_n^2v_q^{(n)})\cos(2\pi r_n\mu_p^{(n)})
+        k(\mathbf{x}_i,\,\mathbf{x}_j) =
+        \sum_{q=1}{Q}w_q\prod_{n=1}{N}
+          \exp\(-2\pi^2r_n^2v_q^{(n)})\cos(2\pi r_n\mu_p^{(n)})
 
     where, by default,
 
@@ -276,16 +278,20 @@ class SpectralMixture(Stationary):
         log_scale: The parameter :math:`log(exp(v)-1)`.
         freq: The parameter :math:`\mu`.
     """
-    weight: jax.Array | float | None = None
-    log_scale: jax.Array | float | None = None
-    freq: jax.Array | float | None = None
+    weight: Array | float | None = None
+    log_scale: Array | float | None = None
+    freq: Array | float | None = None
 
     def evaluate(self, X1, X2):
         tau = jnp.atleast_1d(jnp.abs(X1 - X2))[..., None]
         return jnp.sum(
             self.weight
             * jnp.prod(
-                jnp.exp(-2 * jnp.square(jnp.pi * tau / softplus(self.log_scale)))
+                jnp.exp(
+                    -2. * jnp.square(
+                        jnp.pi * tau / softplus(self.log_scale)
+                        )
+                        )
                 * jnp.cos(2 * jnp.pi * self.freq * tau),
                 axis=0,
             )

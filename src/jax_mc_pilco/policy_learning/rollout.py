@@ -92,11 +92,14 @@ def fit_controller(  # noqa: PLR0913
         p_params, p_static = eqx.partition(policy, eqx.is_array)
 
         def one_rollout_step(
-            carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float], timestep: Float
+            carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float],
+            timestep: Float
         ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float], Float]:
             params, key, samples, total_cost = carry
             policy = eqx.combine(params, p_static)
-            actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
+            actions = jax.vmap(policy)(
+                samples, jnp.tile(timestep, num_particles)
+                )
 
             key, subkey = jr.split(key)
             samples = model.get_samples(subkey, samples, actions, 1)
@@ -105,7 +108,9 @@ def fit_controller(  # noqa: PLR0913
 
         total_cost = 0
         (params, key, samples, total_cost), result = jax.lax.scan(
-            one_rollout_step, (p_params, key, init_samples, total_cost), timesteps
+            one_rollout_step,
+            (p_params, key, init_samples, total_cost),
+            timesteps
         )
         return total_cost
 
@@ -130,7 +135,11 @@ def fit_controller(  # noqa: PLR0913
         loss_gradient = eqx.filter_grad(rollout)(
             policy, initial_train_particles, gp_model, timesteps
         )
-        updates, opt_state = optim.update(loss_gradient, opt_state, policy_params)
+        updates, opt_state = optim.update(
+            loss_gradient,
+            opt_state,
+            policy_params
+            )
         policy = eqx.apply_updates(policy, updates)
         policy_params = eqx.filter(policy, eqx.is_array)
 
@@ -156,7 +165,10 @@ def fit_controller(  # noqa: PLR0913
         # we want the former.
         n = optax.tree_utils.tree_get_all_with_path(opt_state, "count")[0][1]
 
-        return (n == 0) | ((n < max_steps) & (iterations_since_improvement <= patience))
+        return (
+            (n == 0) |
+            ((n < max_steps) & (iterations_since_improvement <= patience))
+        )
 
     # Optimisation loop
 
