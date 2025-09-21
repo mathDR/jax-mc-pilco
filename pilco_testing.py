@@ -11,9 +11,7 @@ import jax.random as jr
 from jaxtyping import ArrayLike, Float
 from typing import Tuple
 
-from jax_mc_pilco.controllers import (
-    Controller, RandomController, SumOfGaussians
-)
+from jax_mc_pilco.controllers import Controller, RandomController, SumOfGaussians
 from jax_mc_pilco.rewards import pendulum_cost  # , cart_pole_cost
 from jax_mc_pilco.model_learning.dynamical_models import (
     IMGPR,
@@ -47,21 +45,12 @@ x, _ = env.reset()
 state_dim = x.shape[0]
 # state is cos_theta, sin_theta, theta_dot
 
-timesteps = np.linspace(
-    0,
-    T_exploration,
-    int(T_exploration / sim_timestep) + 1
-)
+timesteps = np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1)
 # Initialize the Controllers
 
 key = jr.key(42)
 
-random_policy = RandomController(
-    state_dim,
-    action_dim,
-    to_squash=True,
-    max_action=umax
-)
+random_policy = RandomController(state_dim, action_dim, to_squash=True, max_action=umax)
 key, subkey = jr.split(key)
 control_policy = SumOfGaussians(
     state_dim,
@@ -92,9 +81,7 @@ def policy_rollout_with_std(
         policy = eqx.combine(params, p_static)
         actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
         samples = model.get_samples(key, samples, actions, 1)
-        cost = jnp.mean(
-            jax.vmap(pendulum_cost)(jnp.hstack((samples, actions)))
-            )
+        cost = jnp.mean(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
         var = jnp.var(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
         return (params, key, samples, total_cost + cost, total_var + var), cost
 
@@ -146,10 +133,10 @@ for trial in range(num_trials):
         params=model_params,
     )
     if trial == 0:
-        num_policy_opt_steps = 20
+        num_policy_opt_steps = 2000
         model_params = model_params
     else:
-        num_policy_opt_steps = 40
+        num_policy_opt_steps = 4000
         model_params = model.params  # Start from previous model (?)
 
     start_time = time.perf_counter()
@@ -184,10 +171,7 @@ for trial in range(num_trials):
     key, subkey = jr.split(key)
 
     initial_train_particles = model.get_samples(
-        subkey,
-        jnp.array([sample_train]),
-        jnp.array([action_train]),
-        num_particles
+        subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
     )
 
     # Compute cost
@@ -223,3 +207,24 @@ for trial in range(num_trials):
 
     # Explore with optimized control policy going forward
     exploration_policy = control_policy
+
+# When done, print out an example
+env_test = gym.make("Pendulum-v1", render_mode="rgb_array")
+# Now try this policy on the real system
+state, _ = env_test.reset()
+key, subkey = jr.split(key)
+u = control_policy(state, 0.0)
+# Randomly sample some points
+# img = plt.imshow(env_test.render()) # only call this once
+for timestep in range(
+    200
+):  # np.linspace(0,5000*T_exploration,int(T_exploration/sim_timestep)+1):
+    z = env_test.step(np.array(u))
+    state = z[0]
+    r = z[1]
+    key, subkey = jr.split(key)
+    u = control_policy(state, timestep)
+    print(timestep, state, u, r)
+    # img.set_data(env_test.render()) # just update the data
+    # display.display(plt.gcf())
+    # display.clear_output(wait=True)
