@@ -14,7 +14,7 @@ from abc import abstractmethod
 
 import equinox as eqx
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, vmap
 
 
 class Distance(eqx.Module):
@@ -40,7 +40,8 @@ class L1Distance(Distance):
     """The L1 or Manhattan distance between two coordinates"""
 
     def distance(self, X1: Array, X2: Array) -> Array:
-        return jnp.sum(jnp.abs(X1 - X2))
+        dist = lambda x, y: jnp.sum(jnp.abs(x - y))
+        return vmap(vmap(dist, (0, None)), (None, 0))(X1, X2)
 
 
 class L2Distance(Distance):
@@ -54,4 +55,5 @@ class L2Distance(Distance):
         return jnp.where(zeros, r1, jnp.sqrt(r2))
 
     def squared_distance(self, X1: Array, X2: Array) -> Array:
-        return jnp.sum(jnp.square(X1 - X2))
+        dist = lambda x, y: jnp.sum(jnp.square(x - y))
+        return vmap(vmap(dist, (0, None)), (None, 0))(X1, X2)
