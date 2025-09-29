@@ -86,13 +86,9 @@ class Kernel(eqx.Module):
 
         return jnp.dot(self(X1, X2), y)
 
-    def __call__(
-            self,
-            X1: ArrayLike,
-            X2: ArrayLike | None = None
-            ) -> jax.Array:
+    def __call__(self, X1: ArrayLike, X2: ArrayLike | None = None) -> jax.Array:
         if X2 is None:
-            k = jax.vmap(self.evaluate_diag, in_axes=0)(X1)
+            k = self.evaluate_diag(X1)
             if k.ndim != 1:
                 raise ValueError(
                     "Invalid kernel diagonal shape: "
@@ -100,12 +96,7 @@ class Kernel(eqx.Module):
                     "check the dimensions of parameters and custom kernels"
                 )
             return k
-        k = jax.vmap(
-            jax.vmap(
-                self.evaluate,
-                in_axes=(None, 0)
-                ), in_axes=(0, None)
-                )(X1, X2)
+        k = self.evaluate(X1, X2)
         if k.ndim != 2:
             raise ValueError(
                 "Invalid kernel shape: "

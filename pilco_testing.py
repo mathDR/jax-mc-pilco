@@ -113,6 +113,34 @@ states = []
 actions = []
 epsilon = 1e-4
 exploration_policy = random_policy
+
+key, subkey = jr.split(key)
+these_states, these_actions = sample_from_environment(
+    env, timesteps, num_trials, exploration_policy, subkey, no_action=True
+)
+states.extend(these_states)
+actions.extend(these_actions)
+
+states_array = jnp.array(states)
+actions_array = jnp.array(actions)
+
+# Initialize and Fit the GP Model
+model = IMGPR(
+    states=states_array,
+    actions=actions_array,
+    kernel_funcs=ExpSquared,
+    params=model_params,
+)
+
+start_time = time.perf_counter()
+model = optimize_imgpr(
+    model,
+    states=states_array,
+    actions=actions_array,
+)
+end_time = time.perf_counter()
+print(f"Model Optimization Time = {end_time-start_time}")
+
 for trial in range(num_trials):
     # Sample from Enviornment
     key, subkey = jr.split(key)
@@ -126,19 +154,18 @@ for trial in range(num_trials):
     actions_array = jnp.array(actions)
 
     # Initialize and Fit the GP Model
+    if trial == 0:
+        num_policy_opt_steps = 2000
+    else:
+        num_policy_opt_steps = 4000
+    # model_params = model.params  # Start from previous model (?)
+
     model = IMGPR(
         states=states_array,
         actions=actions_array,
         kernel_funcs=ExpSquared,
         params=model_params,
     )
-    if trial == 0:
-        num_policy_opt_steps = 2000
-        model_params = model_params
-    else:
-        num_policy_opt_steps = 4000
-        model_params = model.params  # Start from previous model (?)
-
     start_time = time.perf_counter()
     model = optimize_imgpr(
         model,

@@ -57,9 +57,7 @@ class Stationary(Kernel):
             ``distance`` isn't provided.
     """
 
-    coefficient: Array | float = eqx.field(
-        default_factory=lambda: jnp.ones(())
-    )
+    coefficient: Array | float = eqx.field(default_factory=lambda: jnp.ones(()))
     log_scale: Array | float = eqx.field(default_factory=lambda: jnp.zeros(()))
     distance: Distance = eqx.field(default_factory=L1Distance)
 
@@ -88,7 +86,7 @@ class Exp(Stationary):
                 "transforms.Linear or transforms.Cholesky for more flexiblity"
             )
         return self.coefficient * jnp.exp(
-            -self.distance.distance(X1, X2) / softplus(self.log_scale)
+            -self.distance.distance(X1 / softplus(self.log_scale), X2)
         )
 
 
@@ -112,9 +110,9 @@ class ExpSquared(Stationary):
     distance: Distance = eqx.field(default_factory=L2Distance)
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
-        r2 = self.distance.squared_distance(X1, X2) / jnp.square(
-            softplus(self.log_scale)
-        )
+        # Reshape the scale for possible ARD computations
+        scale = softplus(self.log_scale)
+        r2 = self.distance.squared_distance(X1 / scale, X2 / scale)
         return self.coefficient * jnp.exp(-0.5 * r2)
 
 
@@ -136,9 +134,9 @@ class Matern32(Stationary):
     """
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
-        r = self.distance.distance(X1, X2) / softplus(self.log_scale)
+        r = self.distance.distance(X1 / softplus(self.log_scale), X2)
         arg = np.sqrt(3) * r
-        return self.coefficient * (1. + arg) * jnp.exp(-arg)
+        return self.coefficient * (1.0 + arg) * jnp.exp(-arg)
 
 
 class Matern52(Stationary):
@@ -160,13 +158,9 @@ class Matern52(Stationary):
     """
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
-        r = self.distance.distance(X1, X2) / softplus(self.log_scale)
+        r = self.distance.distance(X1 / softplus(self.log_scale), X2)
         arg = np.sqrt(5) * r
-        return (
-            self.coefficient
-            * (1. + arg + jnp.square(arg) / 3.)
-            * jnp.exp(-arg)
-        )
+        return self.coefficient * (1.0 + arg + jnp.square(arg) / 3.0) * jnp.exp(-arg)
 
 
 class Cosine(Stationary):
@@ -187,7 +181,7 @@ class Cosine(Stationary):
     """
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
-        r = self.distance.distance(X1, X2) / softplus(self.log_scale)
+        r = self.distance.distance(X1 / softplus(self.log_scale), X2)
         return self.coefficient * jnp.cos(2 * jnp.pi * r)
 
 
@@ -217,10 +211,8 @@ class ExpSineSquared(Stationary):
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
         assert self.gamma is not None
-        r = self.distance.distance(X1, X2) / softplus(self.log_scale)
-        return self.coefficient * jnp.exp(
-            -self.gamma * jnp.square(jnp.sin(jnp.pi * r))
-        )
+        r = self.distance.distance(X1 / softplus(self.log_scale), X2)
+        return self.coefficient * jnp.exp(-self.gamma * jnp.square(jnp.sin(jnp.pi * r)))
 
 
 class RationalQuadratic(Stationary):
@@ -249,13 +241,10 @@ class RationalQuadratic(Stationary):
 
     def evaluate(self, X1: Array, X2: Array) -> Array:
         assert self.alpha is not None
-        r2 = self.distance.squared_distance(X1, X2) / jnp.square(
-            softplus(self.log_scale)
+        r2 = self.distance.squared_distance(
+            X1 / softplus(self.log_scale), X2 / softplus(self.log_scale)
         )
-        return (
-            self.coefficient
-            * (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
-        )
+        return self.coefficient * (1.0 + 0.5 * r2 / self.alpha) ** -self.alpha
 
 
 class SpectralMixture(Stationary):
@@ -287,11 +276,7 @@ class SpectralMixture(Stationary):
         return jnp.sum(
             self.weight
             * jnp.prod(
-                jnp.exp(
-                    -2. * jnp.square(
-                        jnp.pi * tau / softplus(self.log_scale)
-                        )
-                        )
+                jnp.exp(-2.0 * jnp.square(jnp.pi * tau / softplus(self.log_scale)))
                 * jnp.cos(2 * jnp.pi * self.freq * tau),
                 axis=0,
             )

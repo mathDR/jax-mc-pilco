@@ -2,7 +2,7 @@
 
 import numpy as np
 import gymnasium as gym
-from jaxtyping import Array, ArrayLike, Int
+from jaxtyping import Array, ArrayLike, Bool, Int
 from jax_mc_pilco.controllers import Controller
 import jax.random as jr
 from jax import config
@@ -22,6 +22,8 @@ def sample_from_environment(
     num_trials: Int,
     policy: Controller,
     key: ArrayLike,
+    *,
+    no_action: Bool = False
 ) -> Tuple[Array, Array]:
     # Randomly sample some points
     key = jr.key(42)
@@ -29,7 +31,10 @@ def sample_from_environment(
     state = remake_state(x)
     states = [state]
     key, subkey = jr.split(key)
-    u = policy(state, 0.0)
+    if no_action:
+        u = np.array([0.0])
+    else:
+        u = policy(state, 0.0)
     actions = [u]
 
     for timestep in timesteps:
@@ -38,7 +43,10 @@ def sample_from_environment(
         state = remake_state(x)
         states.append(state)
         key, subkey = jr.split(key)
-        u = policy(state, timestep)
+        if no_action:
+            u = np.array([0.0])
+        else:
+            u = policy(state, timestep)
         actions.append(u)
 
     for _ in range(num_trials - 1):
@@ -46,7 +54,10 @@ def sample_from_environment(
         state = remake_state(x)
         states.append(state)
         key, subkey = jr.split(key)
-        u = policy(state, 0.0)
+        if no_action:
+            u = np.array([0.0])
+        else:
+            u = policy(state, 0.0)
         actions.append(u)
 
         for timestep in timesteps:
@@ -55,7 +66,10 @@ def sample_from_environment(
             state = remake_state(x)
             states.append(state)
             key, subkey = jr.split(key)
-            u = policy(state, timestep)
+            if no_action:
+                u = np.array([0.0])
+            else:
+                u = policy(state, timestep)
             actions.append(u)
 
     return states, actions
