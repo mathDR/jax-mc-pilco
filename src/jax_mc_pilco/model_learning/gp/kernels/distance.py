@@ -56,4 +56,4 @@ class L2Distance(Distance):
 
     def squared_distance(self, X1: Array, X2: Array) -> Array:
         dist = lambda x, y: jnp.sum(jnp.square(x - y))
-        return vmap(vmap(dist, (0, None)), (None, 0))(X1, X2)
+        return vmap(vmap(dist, (None, 0)), (0, None))(X1, X2)

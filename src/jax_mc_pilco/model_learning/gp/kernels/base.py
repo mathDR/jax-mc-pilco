@@ -88,13 +88,13 @@ class Kernel(eqx.Module):
 
     def __call__(self, X1: ArrayLike, X2: ArrayLike | None = None) -> jax.Array:
         if X2 is None:
-            k = self.evaluate_diag(X1)
-            if k.ndim != 1:
-                raise ValueError(
-                    "Invalid kernel diagonal shape: "
-                    f"expected ndim = 1, got ndim={k.ndim} "
-                    "check the dimensions of parameters and custom kernels"
-                )
+            k = self.evaluate(X1, X1)
+            # if k.ndim != 1:
+            #     raise ValueError(
+            #         "Invalid kernel diagonal shape: "
+            #         f"expected ndim = 1, got ndim={k.ndim} "
+            #         "check the dimensions of parameters and custom kernels"
+            #     )
             return k
         k = self.evaluate(X1, X2)
         if k.ndim != 2:

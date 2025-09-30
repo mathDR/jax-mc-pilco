@@ -192,7 +192,7 @@ class GaussianProcess(eqx.Module):
         covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
 
-        alpha = jsp.linalg.cho_solve((L_xx, True), self.y - mean(self.X))
+        alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) - mean(self.X))
         S2 = jsp.linalg.cho_solve((L_xx.T, False), alpha)
 
         # log_likelihood = -0.5 * jnp.einsum("ik,ik->k", self.y, alpha)
@@ -222,7 +222,7 @@ class GaussianProcess(eqx.Module):
         covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
 
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
-        alpha = jsp.linalg.cho_solve((L_xx, True), self.y - mean(self.X))
+        alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) - mean(self.X))
 
         return (L_xx, alpha)
 
@@ -266,7 +266,7 @@ class GaussianProcess(eqx.Module):
         V = jsp.linalg.solve_triangular(L_xx, K_tx.T, lower=True)
 
         y_cov = (
-            kernel(X_test)
+            kernel(X_test, X_test)
             - jnp.matmul(V.T, V)
             + self.jitter(X_test.shape[0], value=sq_noise)
         )
