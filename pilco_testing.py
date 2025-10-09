@@ -5,20 +5,19 @@ import optax
 import jax
 import equinox as eqx
 import gymnasium as gym
+from gymnasium.utils.save_video import save_video
 from jax import config
 import jax.numpy as jnp
 import numpy as np
 import jax.random as jr
 from jaxtyping import ArrayLike, Float
-from typing import Tuple 
+from typing import Tuple
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 config.update("jax_enable_x64", True)
 
-from jax_mc_pilco.controllers import (
-    Controller, RandomController, SumOfGaussians
-)
+from jax_mc_pilco.controllers import Controller, RandomController, SumOfGaussians
 from jax_mc_pilco.rewards import pendulum_cost
 from jax_mc_pilco.model_learning.dynamical_models import (
     IMGPR,
@@ -29,14 +28,12 @@ from jax_mc_pilco.simulators.simulation import sample_from_environment, remake_s
 from jax_mc_pilco.model_learning.gp.kernels import ExpSquared
 
 num_particles = 400
-num_trials = 3
+num_trials = 8
 num_inducing_points = 200
 T_sampling = 0.05
 T_exploration = 0.35
 T_control = 3.0
 sim_timestep = 0.01
-starting_dropout_probability = 0.25
-control_horizon = int(T_control / T_sampling)
 num_basis = 200
 umax = 2.0
 
@@ -49,19 +46,10 @@ action_dim = env.action_space.shape[0]
 x, _ = env.reset()
 state_dim = x.shape[0]
 
-timesteps = np.linspace(
-    0,
-    T_exploration,
-    int(T_exploration / sim_timestep) + 1
-)
+timesteps = np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1)
 key = jr.key(42)
 
-random_policy = RandomController(
-    state_dim,
-    action_dim,
-    to_squash=True,
-    max_action=umax
-)
+random_policy = RandomController(state_dim, action_dim, to_squash=True, max_action=umax)
 key, subkey = jr.split(key)
 control_policy = SumOfGaussians(
     state_dim * (1 + position_memory),
@@ -73,6 +61,7 @@ control_policy = SumOfGaussians(
     max_action=umax,
     key=subkey,
 )
+
 
 def policy_rollout_with_std(
     policy: Controller,
@@ -86,27 +75,32 @@ def policy_rollout_with_std(
 
     def update_actions(action: ArrayLike, actions: ArrayLike):
         """Append action to the front of actions and pop off last actions value."""
-        return jnp.concatenate([action[:,jnp.newaxis,:], actions[:,:-1,:]],axis=1)
+        return jnp.concatenate([action[:, jnp.newaxis, :], actions[:, :-1, :]], axis=1)
 
     def update_states(state: ArrayLike, states: ArrayLike):
         """Append state to the front of states and pop off last states value."""
-        theta = jnp.atan2(state[:,1],state[:,0])
-        new_state = jnp.array([jnp.cos(theta),jnp.sin(theta),jnp.clip(state[:,2],min=-8,max=8)]).T
-        return jnp.concatenate([new_state[:,jnp.newaxis,:], states[:,:-1,:]],axis=1)
+        theta = jnp.atan2(state[:, 1], state[:, 0])
+        new_state = jnp.array(
+            [jnp.cos(theta), jnp.sin(theta), jnp.clip(state[:, 2], min=-8, max=8)]
+        ).T
+        return jnp.concatenate(
+            [new_state[:, jnp.newaxis, :], states[:, :-1, :]], axis=1
+        )
 
     def one_rollout_step(
         carry: Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float, Float],
         timestep: Float,
     ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float, Float], Float]:
-
         params, key, states, actions, total_cost, total_var = carry
         policy = eqx.combine(params, p_static)
         # Compute the action from the most recent state
-        policy_input = jax.vmap(model.data_to_policy_input)(states,actions)
-        action = jax.vmap(policy,in_axes=(0,None))(policy_input, timestep)
+        policy_input = jax.vmap(model.data_to_policy_input)(states, actions)
+        action = jax.vmap(policy, in_axes=(0, None))(policy_input, timestep)
         actions = update_actions(action, actions)
-        samples = jax.vmap(model.get_samples,in_axes=(None, 0, 0, None))(subkey,states,actions,1)
-        states = update_states(samples,states)
+        samples = jax.vmap(model.get_samples, in_axes=(None, 0, 0, None))(
+            subkey, states, actions, 1
+        )
+        states = update_states(samples, states)
         full_cost = jax.vmap(pendulum_cost)(jnp.hstack((samples, action)))
         cost = jnp.mean(full_cost)
         var = jnp.var(full_cost)
@@ -201,10 +195,17 @@ for trial in range(num_trials):
     # Initialize some particles to run cost
     key, subkey = jr.split(key)
     states_train, actions_train = sample_from_environment(
-            env, timesteps[:max(model.position_memory, model.control_memory)+1], 1, control_policy, model=model, key=subkey
-        )
+        env,
+        timesteps[: max(model.position_memory, model.control_memory) + 1],
+        1,
+        control_policy,
+        model=model,
+        key=subkey,
+    )
     initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
-    initial_states = jnp.tile(jnp.array(states_train,dtype=jnp.float64), (num_particles, 1, 1))
+    initial_states = jnp.tile(
+        jnp.array(states_train, dtype=jnp.float64), (num_particles, 1, 1)
+    )
 
     # Compute cost
     initial_mu = []
@@ -212,7 +213,7 @@ for trial in range(num_trials):
     for i in range(10):
         key, subkey = jr.split(key)
         mu, sig = policy_rollout_with_std(
-            control_policy,initial_states,initial_actions,model,timesteps,subkey
+            control_policy, initial_states, initial_actions, model, timesteps, subkey
         )
         initial_mu.append(mu)
         initial_std.append(jnp.square(sig))
@@ -239,36 +240,33 @@ for trial in range(num_trials):
 
     # Explore with optimized control policy going forward
     exploration_policy = control_policy
+env.close()
 
 breakpoint()
 
-env_test = gym.make("Pendulum-v1", render_mode="rgb_array")
-
 # Now try this policy on the real system
-x, _ = env_test.reset()
+env_test = gym.make("Pendulum-v1", render_mode="rgb_array_list")
+
+x, _ = env_test.reset(seed=0)
 state = remake_state(x)
 states = [state]
-u = env.action_space.sample()
+u = env_test.action_space.sample()
 actions = [u]
 
 for i in range(max(model.position_memory, model.control_memory)):
-    z = env.step(np.array(u))
+    z = env_test.step(np.array(u))
     x = z[0]
     state = remake_state(x)
     states.append(state)
-    u = env.action_space.sample()
+    u = env_test.action_space.sample()
     actions.append(u)
 
 key, subkey = jr.split(key)
-policy_input = model.data_to_policy_input(
-    jnp.array(states),
-    jnp.array(actions)
-)
+policy_input = model.data_to_policy_input(jnp.array(states), jnp.array(actions))
 u = control_policy(policy_input, 0.0, subkey)
 
-img = plt.imshow(env_test.render()) # only call this once
 for i in range(200):
-    z = env.step(np.array(u))
+    z = env_test.step(np.array(u))
     x = z[0]
     state = remake_state(x)
 
@@ -276,18 +274,29 @@ for i in range(200):
     states.pop(-1)
 
     key, subkey = jr.split(key)
-    policy_input = model.data_to_policy_input(
-        jnp.array(states),
-        jnp.array(actions)
-    )
+    policy_input = model.data_to_policy_input(jnp.array(states), jnp.array(actions))
     u = control_policy(policy_input, 0.0, subkey)
     actions.append(u)
     actions.pop(-1)
+save_video(
+    frames=env_test.render(),
+    video_folder="videos",
+    fps=env_test.metadata["render_fps"],
+)
+env_test.close()
 
-    img.set_data(env_test.render()) # just update the data
-    display.display(plt.gcf())
-    display.clear_output(wait=True)
-
-
-
-
+# import gymnasium as gym
+# from gymnasium.utils.save_video import save_video
+# env = gym.make('LunarLander-v3', render_mode="rgb_array_list")
+# env.reset(seed=0)
+# for step_index in range(1000):
+#    action = env.action_space.sample()
+#    _, _, terminated, truncated, _ = env.step(action)
+#    if terminated or truncated:
+#       save_video(
+#          frames=env.render(),
+#          video_folder="videos",
+#          fps=env.metadata["render_fps"],
+#       )
+#       break
+# env.close()
