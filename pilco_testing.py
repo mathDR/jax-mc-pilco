@@ -1,4 +1,5 @@
-# Testing the MC-PILCO framework
+"""Run end to end PILCO optimization."""
+
 import time
 import optax
 import jax
@@ -9,24 +10,26 @@ import jax.numpy as jnp
 import numpy as np
 import jax.random as jr
 from jaxtyping import ArrayLike, Float
-from typing import Tuple
+from typing import Tuple 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 
-from jax_mc_pilco.controllers import Controller, RandomController, SumOfGaussians
-from jax_mc_pilco.rewards import pendulum_cost  # , cart_pole_cost
+config.update("jax_enable_x64", True)
+
+from jax_mc_pilco.controllers import (
+    Controller, RandomController, SumOfGaussians
+)
+from jax_mc_pilco.rewards import pendulum_cost
 from jax_mc_pilco.model_learning.dynamical_models import (
     IMGPR,
     optimize_imgpr,
 )
 from jax_mc_pilco.policy_learning.rollout import fit_controller
-from jax_mc_pilco.simulators.simulation import sample_from_environment
+from jax_mc_pilco.simulators.simulation import sample_from_environment, remake_state
 from jax_mc_pilco.model_learning.gp.kernels import ExpSquared
 
-config.update("jax_enable_x64", True)
-
-# Globals
-
 num_particles = 400
-num_trials = 8
+num_trials = 3
 num_inducing_points = 200
 T_sampling = 0.05
 T_exploration = 0.35
@@ -37,23 +40,31 @@ control_horizon = int(T_control / T_sampling)
 num_basis = 200
 umax = 2.0
 
-# Generate the environments
+position_memory = 2
+control_memory = 1
+
 env = gym.make("Pendulum-v1")
 
 action_dim = env.action_space.shape[0]
 x, _ = env.reset()
 state_dim = x.shape[0]
-# state is cos_theta, sin_theta, theta_dot
 
-timesteps = np.linspace(0, T_exploration, int(T_exploration / sim_timestep) + 1)
-# Initialize the Controllers
-
+timesteps = np.linspace(
+    0,
+    T_exploration,
+    int(T_exploration / sim_timestep) + 1
+)
 key = jr.key(42)
 
-random_policy = RandomController(state_dim, action_dim, to_squash=True, max_action=umax)
+random_policy = RandomController(
+    state_dim,
+    action_dim,
+    to_squash=True,
+    max_action=umax
+)
 key, subkey = jr.split(key)
 control_policy = SumOfGaussians(
-    state_dim,
+    state_dim * (1 + position_memory),
     action_dim,
     num_basis,
     initial_log_lengthscales=None,
@@ -63,39 +74,55 @@ control_policy = SumOfGaussians(
     key=subkey,
 )
 
-
 def policy_rollout_with_std(
     policy: Controller,
-    init_samples: ArrayLike,
+    init_states: ArrayLike,
+    init_actions: ArrayLike,
     model: eqx.Module,
     timesteps: ArrayLike,
     key: ArrayLike = jr.key(42),
 ) -> Tuple[Float, Float]:
     p_params, p_static = eqx.partition(policy, eqx.is_array)
 
+    def update_actions(action: ArrayLike, actions: ArrayLike):
+        """Append action to the front of actions and pop off last actions value."""
+        return jnp.concatenate([action[:,jnp.newaxis,:], actions[:,:-1,:]],axis=1)
+
+    def update_states(state: ArrayLike, states: ArrayLike):
+        """Append state to the front of states and pop off last states value."""
+        theta = jnp.atan2(state[:,1],state[:,0])
+        new_state = jnp.array([jnp.cos(theta),jnp.sin(theta),jnp.clip(state[:,2],min=-8,max=8)]).T
+        return jnp.concatenate([new_state[:,jnp.newaxis,:], states[:,:-1,:]],axis=1)
+
     def one_rollout_step(
-        carry: Tuple[ArrayLike, ArrayLike, ArrayLike, Float, Float],
+        carry: Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float, Float],
         timestep: Float,
-    ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, Float, Float], Float]:
-        params, key, samples, total_cost, total_var = carry
+    ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float, Float], Float]:
+
+        params, key, states, actions, total_cost, total_var = carry
         policy = eqx.combine(params, p_static)
-        actions = jax.vmap(policy)(samples, jnp.tile(timestep, num_particles))
-        samples = model.get_samples(key, samples, actions, 1)
-        cost = jnp.mean(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
-        var = jnp.var(jax.vmap(pendulum_cost)(jnp.hstack((samples, actions))))
-        return (params, key, samples, total_cost + cost, total_var + var), cost
+        # Compute the action from the most recent state
+        policy_input = jax.vmap(model.data_to_policy_input)(states,actions)
+        action = jax.vmap(policy,in_axes=(0,None))(policy_input, timestep)
+        actions = update_actions(action, actions)
+        samples = jax.vmap(model.get_samples,in_axes=(None, 0, 0, None))(subkey,states,actions,1)
+        states = update_states(samples,states)
+        full_cost = jax.vmap(pendulum_cost)(jnp.hstack((samples, action)))
+        cost = jnp.mean(full_cost)
+        var = jnp.var(full_cost)
+        return (params, key, states, actions, total_cost + cost, total_var + var), cost
 
     total_cost = 0
     total_var = 0
-    (params, key, samples, total_cost, total_var), result = jax.lax.scan(
+    (params, key, states, actions, total_cost, total_var), result = jax.lax.scan(
         one_rollout_step,
-        (p_params, key, init_samples, total_cost, total_var),
+        (p_params, key, init_states, init_actions, total_cost, total_var),
         timesteps,
     )
     return (total_cost, jnp.sqrt(total_var))
 
 
-# Main Loop
+# # Main Loop
 model_params = [
     {
         "kernel": {
@@ -113,40 +140,17 @@ states = []
 actions = []
 epsilon = 1e-4
 exploration_policy = random_policy
-
-key, subkey = jr.split(key)
-these_states, these_actions = sample_from_environment(
-    env, timesteps, num_trials, exploration_policy, subkey, no_action=True
-)
-states.extend(these_states)
-actions.extend(these_actions)
-
-states_array = jnp.array(states)
-actions_array = jnp.array(actions)
-
-# Initialize and Fit the GP Model
-model = IMGPR(
-    states=states_array,
-    actions=actions_array,
-    kernel_funcs=ExpSquared,
-    params=model_params,
-)
-
-start_time = time.perf_counter()
-model = optimize_imgpr(
-    model,
-    states=states_array,
-    actions=actions_array,
-)
-end_time = time.perf_counter()
-print(f"Model Optimization Time = {end_time-start_time}")
-
 for trial in range(num_trials):
-    # Sample from Enviornment
-    key, subkey = jr.split(key)
-    these_states, these_actions = sample_from_environment(
-        env, timesteps, num_trials, exploration_policy, subkey
-    )
+    # Sample from Environment
+    if trial == 0:
+        these_states, these_actions = sample_from_environment(
+            env, timesteps, num_trials, exploration_policy, model=None, key=subkey
+        )
+    else:
+        key, subkey = jr.split(key)
+        these_states, these_actions = sample_from_environment(
+            env, timesteps, num_trials, exploration_policy, model=model, key=subkey
+        )
     states.extend(these_states)
     actions.extend(these_actions)
 
@@ -154,18 +158,21 @@ for trial in range(num_trials):
     actions_array = jnp.array(actions)
 
     # Initialize and Fit the GP Model
-    if trial == 0:
-        num_policy_opt_steps = 2000
-    else:
-        num_policy_opt_steps = 4000
-    # model_params = model.params  # Start from previous model (?)
-
     model = IMGPR(
         states=states_array,
         actions=actions_array,
         kernel_funcs=ExpSquared,
         params=model_params,
+        position_memory=position_memory,
+        control_memory=control_memory,
     )
+    if trial == 0:
+        num_policy_opt_steps = 2000
+        model_params = model_params
+    else:
+        num_policy_opt_steps = 4000
+        model_params = model.params  # Start from previous model (?)
+
     start_time = time.perf_counter()
     model = optimize_imgpr(
         model,
@@ -176,9 +183,10 @@ for trial in range(num_trials):
     print(f"Model Optimization Time = {end_time-start_time}")
 
     # Set up Optimizer for Policy Optimization
-    factor = min(1.0, max(0.0, (trial - 5) / 20))
+    factor = min(1.0, max(0.0, (trial - 5) / 20.0))
     if factor == 0.0:
         init_state = [1e-6, 1e-6]  # Cannot use zero because of the reset
+
     else:
         key, subkey = jr.split(key)
         init_state = [float(factor * jnp.pi * jr.uniform(subkey))]
@@ -191,15 +199,12 @@ for trial in range(num_trials):
 
     optimizer = optax.adam(learning_rate=cosine_decay_scheduler)
     # Initialize some particles to run cost
-    sample_train, _ = env.reset(
-        options={"x_init": init_state[0], "y_init": init_state[1]}
-    )
-    action_train = control_policy(sample_train, 0.0)
     key, subkey = jr.split(key)
-
-    initial_train_particles = model.get_samples(
-        subkey, jnp.array([sample_train]), jnp.array([action_train]), num_particles
-    )
+    states_train, actions_train = sample_from_environment(
+            env, timesteps[:max(model.position_memory, model.control_memory)+1], 1, control_policy, model=model, key=subkey
+        )
+    initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
+    initial_states = jnp.tile(jnp.array(states_train,dtype=jnp.float64), (num_particles, 1, 1))
 
     # Compute cost
     initial_mu = []
@@ -207,7 +212,7 @@ for trial in range(num_trials):
     for i in range(10):
         key, subkey = jr.split(key)
         mu, sig = policy_rollout_with_std(
-            control_policy, initial_train_particles, model, timesteps, subkey
+            control_policy,initial_states,initial_actions,model,timesteps,subkey
         )
         initial_mu.append(mu)
         initial_std.append(jnp.square(sig))
@@ -217,17 +222,17 @@ for trial in range(num_trials):
 
     # Optimize Policy using fitted GP model
     start_time = time.perf_counter()
+    key, subkey = jr.split(key)
     control_policy = fit_controller(
         policy=control_policy,
-        env=env,
-        num_particles=num_particles,
-        initial_state=init_state,
+        init_states=initial_states,
+        init_actions=initial_actions,
         timesteps=timesteps,
         gp_model=model,
         obj_func=pendulum_cost,
         optim=optimizer,
+        key=subkey,
         max_steps=num_policy_opt_steps,
-        key=key,
     )
     end_time = time.perf_counter()
     print(f"Policy Optimization Time = {end_time-start_time}")
@@ -235,23 +240,54 @@ for trial in range(num_trials):
     # Explore with optimized control policy going forward
     exploration_policy = control_policy
 
-# When done, print out an example
+breakpoint()
+
 env_test = gym.make("Pendulum-v1", render_mode="rgb_array")
+
 # Now try this policy on the real system
-state, _ = env_test.reset()
+x, _ = env_test.reset()
+state = remake_state(x)
+states = [state]
+u = env.action_space.sample()
+actions = [u]
+
+for i in range(max(model.position_memory, model.control_memory)):
+    z = env.step(np.array(u))
+    x = z[0]
+    state = remake_state(x)
+    states.append(state)
+    u = env.action_space.sample()
+    actions.append(u)
+
 key, subkey = jr.split(key)
-u = control_policy(state, 0.0)
-# Randomly sample some points
-# img = plt.imshow(env_test.render()) # only call this once
-for timestep in range(
-    200
-):  # np.linspace(0,5000*T_exploration,int(T_exploration/sim_timestep)+1):
-    z = env_test.step(np.array(u))
-    state = z[0]
-    r = z[1]
+policy_input = model.data_to_policy_input(
+    jnp.array(states),
+    jnp.array(actions)
+)
+u = control_policy(policy_input, 0.0, subkey)
+
+img = plt.imshow(env_test.render()) # only call this once
+for i in range(200):
+    z = env.step(np.array(u))
+    x = z[0]
+    state = remake_state(x)
+
+    states.append(state)
+    states.pop(-1)
+
     key, subkey = jr.split(key)
-    u = control_policy(state, timestep)
-    print(timestep, state, u, r)
-    # img.set_data(env_test.render()) # just update the data
-    # display.display(plt.gcf())
-    # display.clear_output(wait=True)
+    policy_input = model.data_to_policy_input(
+        jnp.array(states),
+        jnp.array(actions)
+    )
+    u = control_policy(policy_input, 0.0, subkey)
+    actions.append(u)
+    actions.pop(-1)
+
+    img.set_data(env_test.render()) # just update the data
+    display.display(plt.gcf())
+    display.clear_output(wait=True)
+
+
+
+
