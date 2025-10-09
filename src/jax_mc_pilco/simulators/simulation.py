@@ -1,18 +1,22 @@
 """Functions for interacting with the gymnasium environments."""
 
 import numpy as np
-import gymnasium as gym
-from jaxtyping import Array, ArrayLike, Bool, Int
+import equinox as eqx  # type: ignore
+import gymnasium as gym  # type: ignore
+from jaxtyping import Array, ArrayLike, Int
 from jax_mc_pilco.controllers import Controller
 import jax.random as jr
 from jax import config
+import jax.numpy as jnp
 from typing import Tuple
 
 config.update("jax_enable_x64", True)
 
 
 def remake_state(x):
-    return x
+    # return x
+    theta = np.atan2(x[1], x[0])
+    return [np.cos(theta), np.sin(theta), np.clip(x[2], min=-8, max=8)]
     # return np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
 
 
@@ -21,55 +25,114 @@ def sample_from_environment(
     timesteps: ArrayLike,
     num_trials: Int,
     policy: Controller,
-    key: ArrayLike,
     *,
-    no_action: Bool = False
+    model: eqx.Module | None,
+    key: ArrayLike | None,
 ) -> Tuple[Array, Array]:
-    # Randomly sample some points
-    key = jr.key(42)
-    x, _ = env.reset()
-    state = remake_state(x)
-    states = [state]
-    key, subkey = jr.split(key)
-    if no_action:
-        u = np.array([0.0])
-    else:
-        u = policy(state, 0.0)
-    actions = [u]
+    """Sample from the `env` environment using the passed in policy."""
 
-    for timestep in timesteps:
-        z = env.step(np.array(u))
-        x = z[0]
-        state = remake_state(x)
-        states.append(state)
-        key, subkey = jr.split(key)
-        if no_action:
-            u = np.array([0.0])
-        else:
-            u = policy(state, timestep)
-        actions.append(u)
-
-    for _ in range(num_trials - 1):
+    if key is None:
+        key = jr.key(42)
+    if model is None:
         x, _ = env.reset()
         state = remake_state(x)
-        states.append(state)
+        ret_states = [state]
+        u = env.action_space.sample()
+        ret_actions = [u]
+        for timestep in timesteps:
+            z = env.step(np.array(u))
+            x = z[0]
+            state = remake_state(x)
+            ret_states.append(state)
+            u = env.action_space.sample()
+            ret_actions.append(u)
+
+        for _ in range(num_trials - 1):
+            x, _ = env.reset()
+            state = remake_state(x)
+            ret_states.append(state)
+            u = env.action_space.sample()
+            ret_actions.append(u)
+            for timestep in timesteps:
+                z = env.step(np.array(u))
+                x = z[0]
+                state = remake_state(x)
+                ret_states.append(state)
+                u = env.action_space.sample()
+                ret_actions.append(u)
+    else:
+        # Initally seed the state that the policy requires
+        x, _ = env.reset()
+        state = remake_state(x)
+        states = [state]
+        u = env.action_space.sample()
+        actions = [u]
+
+        for i in range(max(model.position_memory, model.control_memory)):
+            z = env.step(np.array(u))
+            x = z[0]
+            state = remake_state(x)
+            states.append(state)
+            u = env.action_space.sample()
+            actions.append(u)
+
         key, subkey = jr.split(key)
-        if no_action:
-            u = np.array([0.0])
-        else:
-            u = policy(state, 0.0)
-        actions.append(u)
+        policy_input = model.data_to_policy_input(
+            jnp.array(states),
+            jnp.array(actions)
+        )
+        u = policy(policy_input, 0.0, subkey)
+        ret_actions = []
+        ret_states = []
 
         for timestep in timesteps:
             z = env.step(np.array(u))
             x = z[0]
             state = remake_state(x)
+            ret_states.append(state)
             states.append(state)
+            states.pop(-1)
             key, subkey = jr.split(key)
-            if no_action:
-                u = np.array([0.0])
-            else:
-                u = policy(state, timestep)
+            policy_input = model.data_to_policy_input(
+                jnp.array(states),
+                jnp.array(actions)
+            )
+            u = policy(policy_input, 0.0, subkey)
             actions.append(u)
+            actions.pop(-1)
+            ret_actions.append(u)
 
-    return states, actions
+        for _ in range(num_trials - 1):
+            x, _ = env.reset()
+            state = remake_state(x)
+            states = [state]
+            u = env.action_space.sample()
+            actions = [u]
+            for i in range(max(model.position_memory, model.control_memory)):
+                z = env.step(np.array(u))
+                x = z[0]
+                state = remake_state(x)
+                states.append(state)
+                u = env.action_space.sample()
+                actions.append(u)
+
+            u = policy(policy_input, 0.0, subkey)
+
+            for timestep in timesteps:
+                z = env.step(np.array(u))
+                x = z[0]
+                state = remake_state(x)
+                states.append(state)
+                states.pop(-1)
+                ret_states.append(state)
+                key, subkey = jr.split(key)
+                policy_input = model.data_to_policy_input(
+                    jnp.array(states),
+                    jnp.array(actions)
+                )
+                u = policy(policy_input, 0.0, subkey)
+                actions.append(u)
+                actions.pop(-1)
+                ret_actions.append(u)
+
+    return ret_states, ret_actions

@@ -42,10 +42,10 @@ def pendulum_cost(
     y = states_sequence[1]
     angle_velocity = states_sequence[2]
     torque = states_sequence[3]
-    theta = jnp.atan2(x, y)
+    theta = jnp.atan2(y, x)
 
     return (
         jnp.square(theta) +
         0.1*jnp.square(angle_velocity) +
         0.001*jnp.square(torque)
-        )
+    )

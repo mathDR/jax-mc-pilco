@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "Controller",
+    "RandomController",
+    "LinearPolicy",
+    "SumOfSinusoids",
+    "SumOfGaussians"
+    ]
+
 from typing import Callable, Tuple
 
 import jax.numpy as jnp
 import jax.random as jr
-import equinox as eqx
+import equinox as eqx  # type: ignore
 from jax import Array
 from jaxtyping import ArrayLike, Bool, Float, Int
 
@@ -230,7 +238,9 @@ class SumOfSinusoids(Controller):
     ) -> Array:
         return self.f_squash(
             jnp.sum(
-                self.amplitudes * (jnp.sin(self.omega * timestep + self.phases)),
+                self.amplitudes * (
+                    jnp.sin(self.omega * timestep + self.phases)
+                    ),
                 axis=0,
             ).reshape(
                 self.action_dim,
@@ -275,10 +285,11 @@ class SumOfGaussians(Controller):
 
         # set number of gaussian basis functions
         self.num_basis = num_basis
+
         # get initial log lengthscales
         if initial_log_lengthscales is None:
-            initial_log_lengthscales = jnp.ones(self.state_dim)
-        self.log_lengthscales = jnp.log(initial_log_lengthscales).reshape([1, -1])
+            initial_log_lengthscales = 4.0*jnp.ones(self.state_dim)
+        self.log_lengthscales = initial_log_lengthscales.reshape([1, -1])
 
         # get initial centers
         if initial_centers is None:
@@ -327,7 +338,10 @@ class SumOfGaussians(Controller):
         norm_centers = self.centers / lengthscales
         # get the square distances
         distances = jnp.squeeze(
-            jnp.linalg.norm(norm_states[:, None, :] - norm_centers[None, :, :], axis=2)
+            jnp.linalg.norm(
+                norm_states[:, None, :] - norm_centers[None, :, :],
+                axis=2
+                )
         )
         rbf_activations = jnp.exp(-0.5 * jnp.square(distances))
         inputs = self.f_linear(rbf_activations).reshape(

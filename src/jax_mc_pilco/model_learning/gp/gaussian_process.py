@@ -1,10 +1,12 @@
+"""The main Gaussian Process Class."""
+
 from __future__ import annotations
 
 __all__ = ["GaussianProcess"]
 
-from jaxtyping import ArrayLike, Bool, Float
+from jaxtyping import ArrayLike, Bool, Float, PyTree
 from typing import Dict, Tuple
-import equinox as eqx
+import equinox as eqx  # type: ignore
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -38,7 +40,29 @@ def gp_fit(
             Defaults to 500.
          max_linesearch_steps (int): The maximum number of linesearch steps to
             use for finding the stepsize.Defaults to 32.
-         gtol (float): Terminate the optimisation if the L2 norm of the
+         gtolptax.tree_utils.tree_get(opt_state, "grad")
+        g_l2_norm = optax.tree_utils.tree_norm(g)
+        return (n == 0) | ((n < max_iters) & (g_l2_norm >= gtol))
+
+    # Optimisation loop
+    opt_vals, opt_state = jax.lax.while_loop(
+        continue_fn,
+        step,
+        (vals, opt_state),
+    )
+    final_params = eqx.combine(opt_vals, static)
+
+    cached_choleskys = model.compute_cached_choleskys(final_params)
+
+    return GaussianProcess(
+        model.kernel,
+        model.X,
+        model.y,
+        final_params,
+        mean_function=model.mean_function,
+        optimized=True,
+        cached_choleskys=cached_choleskys,
+    ) (float): Terminate the optimisation if the L2 norm of the
             gradient is below this threshold. Defaults to 1e-8.
 
      Returns:
@@ -60,16 +84,17 @@ def gp_fit(
     )
 
     opt_state = optim.init(model.params)
+    # Using optax's value_and_grad_from_state is more efficient given
+    # LBFGS uses a linesearch
+    # See
+    # https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
     loss_value_and_grad = optax.value_and_grad_from_state(loss)
 
     # Optimisation step.
     @jax.jit
-    def step(carry):
+    def step(carry: Tuple[Dict, PyTree]) -> Tuple[Dict, PyTree]:
+        """Implement one step of optimization."""
         vals, opt_state = carry
-        # Using optax's value_and_grad_from_state is more efficient given
-        # LBFGS uses a linesearch
-        # See
-        # https://optax.readthedocs.io/en/latest/api/utilities.html#optax.value_and_grad_from_state
         loss_val, loss_gradient = loss_value_and_grad(vals, state=opt_state)
         updates, opt_state = optim.update(
             loss_gradient,
@@ -83,7 +108,8 @@ def gp_fit(
 
         return vals, opt_state
 
-    def continue_fn(carry):
+    def continue_fn(carry: Tuple[Dict, PyTree]) -> Bool:
+        """A function that determines if the while loop should proceed."""
         _, opt_state = carry
         n = optax.tree_utils.tree_get(opt_state, "count")
         g = optax.tree_utils.tree_get(opt_state, "grad")
@@ -105,7 +131,7 @@ def gp_fit(
         model.X,
         model.y,
         final_params,
-        mean=model.mean,
+        mean_function=model.mean_function,
         optimized=True,
         cached_choleskys=cached_choleskys,
     )
@@ -122,8 +148,8 @@ class GaussianProcess(eqx.Module):
         y (ArrayLike): The observed data. This should have the shape
             ``(N_data,)``, where ``N_data`` was the zeroth axis of the ``X``
             data provided when instantiating this object.
-        mean (Mean): The mean function.  If not specified, a zero mean will be
-            used.
+        mean_function (Mean): The mean function.  If not specified, a zero
+            mean process will be used.
     """
 
     num_data: int = eqx.field(static=True)
@@ -131,7 +157,7 @@ class GaussianProcess(eqx.Module):
     kernel: Kernel
     X: ArrayLike
     y: ArrayLike
-    mean: Mean
+    mean_function: Mean
     params: Dict
     optimized: Bool
     cached_choleskys: Tuple[ArrayLike, ArrayLike, ArrayLike]
@@ -143,7 +169,7 @@ class GaussianProcess(eqx.Module):
         y: ArrayLike,
         params: Dict,
         *,
-        mean: Mean | None = None,
+        mean_function: Mean | None = None,
         optimized: Bool | None = None,
         cached_choleskys: Tuple[ArrayLike, ArrayLike] | None = None,
     ):
@@ -151,10 +177,10 @@ class GaussianProcess(eqx.Module):
         self.X = X
         self.y = y
 
-        if mean:
-            self.mean = mean
+        if mean_function:
+            self.mean_function = mean_function
         else:
-            self.mean = ZeroMean
+            self.mean_function = ZeroMean
 
         self.num_data = X.shape[0]
         self.dtype = X.dtype
@@ -182,17 +208,22 @@ class GaussianProcess(eqx.Module):
             evaluated at ``self.y``.
         """
 
-        kernel = self.kernel(**params["kernel"])
-        mean = self.mean(**params["mean"])
+        # kernel = self.kernel(**params["kernel"])
+        # mean = self.mean_function(**params["mean"])
 
-        log_noise = params["likelihood"]["log_diag"]
-        noise = softplus(log_noise)
-        sq_noise = jnp.square(noise)
+        # log_noise = params["likelihood"]["log_diag"]
+        # noise = softplus(log_noise)
+        # sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
-        L_xx = jsp.linalg.cholesky(covariance, lower=True)
+        # covariance = kernel(self.X, self.X) + self.jitter(
+        #     self.num_data,
+        #     value=sq_noise
+        #     )
+        # L_xx = jsp.linalg.cholesky(covariance, lower=True)
 
-        alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) - mean(self.X))
+        # alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) -
+        #                              mean(self.X))
+        L_xx, alpha = self.compute_cached_choleskys(params)
         S2 = jsp.linalg.cho_solve((L_xx.T, False), alpha)
 
         # log_likelihood = -0.5 * jnp.einsum("ik,ik->k", self.y, alpha)
@@ -213,16 +244,20 @@ class GaussianProcess(eqx.Module):
         """
 
         kernel = self.kernel(**params["kernel"])
-        mean = self.mean(**params["mean"])
+        mean = self.mean_function(**params["mean"])
 
         log_noise = params["likelihood"]["log_diag"]
         noise = softplus(log_noise)
         sq_noise = jnp.square(noise)
 
-        covariance = kernel(self.X, self.X) + self.jitter(self.num_data, value=sq_noise)
+        covariance = kernel(self.X, self.X) + self.jitter(
+            self.num_data,
+            value=sq_noise
+        )
 
         L_xx = jsp.linalg.cholesky(covariance, lower=True)
-        alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) - mean(self.X))
+        alpha = jsp.linalg.cho_solve((L_xx, True), jnp.squeeze(self.y) -
+                                     mean(self.X))
 
         return (L_xx, alpha)
 
@@ -250,7 +285,7 @@ class GaussianProcess(eqx.Module):
             warnings.warn("You are calling predict on an unoptimized gp.")
 
         kernel = self.kernel(**self.params["kernel"])
-        mean = self.mean(**self.params["mean"])
+        mean = self.mean_function(**self.params["mean"])
 
         log_noise = self.params["likelihood"]["log_diag"]
         noise = softplus(log_noise)
