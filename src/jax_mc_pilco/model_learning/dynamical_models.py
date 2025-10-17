@@ -12,7 +12,7 @@ import jax.numpy as jnp
 
 with install_import_hook("gpjax", "beartype.beartype"):
     import gpjax
-from gpjax import lower_cholesky
+from gpjax.linalg.operations import lower_cholesky
 from gpjax.kernels import AbstractKernel
 from gpjax.likelihoods import AbstractLikelihood, Gaussian
 from gpjax.mean_functions import AbstractMeanFunction, Zero

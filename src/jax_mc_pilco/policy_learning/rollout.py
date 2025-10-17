@@ -1,6 +1,6 @@
 """ Optimize a controller on a given cost function."""
 
-import equinox as eqx   # type: ignore
+import equinox as eqx  # type: ignore
 import optax
 import jax
 import jax.numpy as jnp
@@ -51,54 +51,33 @@ def fit_controller(  # noqa: PLR0913
 
         def update_actions(action: ArrayLike, actions: ArrayLike):
             """Append action to the front of actions and pop off last actions
-               value.
+            value.
             """
             return jnp.concatenate(
-                [
-                    action[:, jnp.newaxis, :],
-                    actions[:, :-1, :]
-                ],
-                axis=1
+                [action[:, jnp.newaxis, :], actions[:, :-1, :]], axis=1
             )
 
         def update_states(state: ArrayLike, states: ArrayLike):
             """Append state to the front of states and pop off last states
-               value.
+            value.
             """
             theta = jnp.atan2(state[:, 1], state[:, 0])
             new_state = jnp.array(
-                [jnp.cos(theta),
-                 jnp.sin(theta),
-                 jnp.clip(state[:, 2], min=-8, max=8)
-                 ]
+                [jnp.cos(theta), jnp.sin(theta), jnp.clip(state[:, 2], min=-8, max=8)]
             ).T
             return jnp.concatenate(
-                [new_state[:, jnp.newaxis, :], states[:, :-1, :]],
-                axis=1
+                [new_state[:, jnp.newaxis, :], states[:, :-1, :]], axis=1
             )
 
         def one_rollout_step(
             carry: Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float],
             timestep: Float,
-        ) -> Tuple[
-            Tuple[
-                ArrayLike,
-                ArrayLike,
-                ArrayLike,
-                ArrayLike,
-                Float
-                ],
-            Float
-        ]:
+        ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float], Float]:
             params, key, states, actions, total_cost = carry
             policy = eqx.combine(params, p_static)
             # Compute the action from the most recent state
-            policy_input = jax.vmap(
-                model.data_to_policy_input
-            )(states, actions)
-            action = jax.vmap(
-                policy, in_axes=(0, None)
-            )(policy_input, timestep)
+            policy_input = jax.vmap(model.data_to_policy_input)(states, actions)
+            action = jax.vmap(policy, in_axes=(0, None))(policy_input, timestep)
             actions = update_actions(action, actions)
             samples = model.get_samples(subkey, states, actions)
             states = update_states(samples, states)
@@ -106,6 +85,7 @@ def fit_controller(  # noqa: PLR0913
 
             return (params, key, states, actions, total_cost + cost), cost
 
+        breakpoint()
         total_cost = 0
         key, subkey = jr.split(key)
         (_, _, _, _, total_cost), _ = jax.lax.scan(
@@ -139,22 +119,13 @@ def fit_controller(  # noqa: PLR0913
         loss_gradient = eqx.filter_grad(rollout)(
             policy, init_states, init_actions, gp_model, timesteps, subkey
         )
-        updates, opt_state = optim.update(
-            loss_gradient,
-            opt_state,
-            policy_params
-            )
+        updates, opt_state = optim.update(loss_gradient, opt_state, policy_params)
         policy = eqx.apply_updates(policy, updates)
         policy_params = eqx.filter(policy, eqx.is_array)
 
         key, subkey = jr.split(key)
         val_loss = rollout(
-            policy,
-            init_states,
-            init_actions,
-            gp_model,
-            timesteps,
-            subkey
+            policy, init_states, init_actions, gp_model, timesteps, subkey
         )
 
         iterations_since_improvement = jax.lax.cond(
@@ -178,15 +149,12 @@ def fit_controller(  # noqa: PLR0913
         # we want the former.
         n = optax.tree_utils.tree_get_all_with_path(opt_state, "count")[0][1]
 
-        return (
-            (n == 0) |
-            ((n < max_steps) & (iterations_since_improvement <= patience))
-        )
+        return (n == 0) | ((n < max_steps) & (iterations_since_improvement <= patience))
 
     # Optimisation loop
-
     policy_params, policy_static = eqx.partition(policy, eqx.is_array)
     key, subkey = jr.split(key)
+    breakpoint()
     policy_params, _, _, _, _ = jax.lax.while_loop(
         continue_fn,
         make_step,
