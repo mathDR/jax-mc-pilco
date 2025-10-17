@@ -85,7 +85,6 @@ def fit_controller(  # noqa: PLR0913
 
             return (params, key, states, actions, total_cost + cost), cost
 
-        breakpoint()
         total_cost = 0
         key, subkey = jr.split(key)
         (_, _, _, _, total_cost), _ = jax.lax.scan(
