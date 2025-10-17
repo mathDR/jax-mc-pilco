@@ -1,31 +1,31 @@
 """Run end to end PILCO optimization."""
 
+# Enable Float64 for more stable matrix inversions.
 import time
 import optax
 import jax
 import equinox as eqx
 import gymnasium as gym
-from gymnasium.utils.save_video import save_video
 from jax import config
 import jax.numpy as jnp
 import numpy as np
 import jax.random as jr
 from jaxtyping import ArrayLike, Float
 from typing import Tuple
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 
 config.update("jax_enable_x64", True)
 
+import gpjax
 from jax_mc_pilco.controllers import Controller, RandomController, SumOfGaussians
-from jax_mc_pilco.rewards import pendulum_cost
+from jax_mc_pilco.rewards import pendulum_cost  # , cart_pole_cost
 from jax_mc_pilco.model_learning.dynamical_models import (
     IMGPR,
+    IMSVGPR,
     optimize_imgpr,
+    optimize_imsvgpr,
 )
 from jax_mc_pilco.policy_learning.rollout import fit_controller
 from jax_mc_pilco.simulators.simulation import sample_from_environment, remake_state
-from jax_mc_pilco.model_learning.gp.kernels import ExpSquared
 
 num_particles = 400
 num_trials = 8
@@ -37,7 +37,6 @@ sim_timestep = 0.01
 num_basis = 200
 umax = 2.0
 num_inducing_points = 250
-
 
 position_memory = 2
 control_memory = 1
@@ -99,9 +98,7 @@ def policy_rollout_with_std(
         policy_input = jax.vmap(model.data_to_policy_input)(states, actions)
         action = jax.vmap(policy, in_axes=(0, None))(policy_input, timestep)
         actions = update_actions(action, actions)
-        samples = jax.vmap(model.get_samples, in_axes=(None, 0, 0, None))(
-            subkey, states, actions, 1
-        )
+        samples = model.get_samples(subkey, states, actions)
         states = update_states(samples, states)
         full_cost = jax.vmap(pendulum_cost)(jnp.hstack((samples, action)))
         cost = jnp.mean(full_cost)
@@ -119,19 +116,6 @@ def policy_rollout_with_std(
 
 
 # # Main Loop
-model_params = [
-    {
-        "kernel": {
-            "coefficient": jnp.array(0.9, dtype=jnp.float64),
-            "log_scale": jnp.array(0.0, dtype=jnp.float64),
-        },
-        "mean": {},
-        "likelihood": {
-            "log_diag": jnp.array(-0.5, dtype=jnp.float64),
-        },
-    }
-] * state_dim
-
 states = []
 actions = []
 epsilon = 1e-4
@@ -150,33 +134,44 @@ for trial in range(num_trials):
     states.extend(these_states)
     actions.extend(these_actions)
 
-    states_array = jnp.array(states)
-    actions_array = jnp.array(actions)
-    print(states_array.shape)
+    states_array = jnp.array(states, dtype=jnp.float64)
+    actions_array = jnp.array(actions, dtype=jnp.float64)
+
+    if trial == 0:
+        num_policy_opt_steps = 2000
+    else:
+        num_policy_opt_steps = 4000
+
     # Initialize and Fit the GP Model
-    model = IMGPR(
+    # model = IMGPR(
+    #     states=states_array,
+    #     actions=actions_array,
+    #     kernel_funcs=gpjax.kernels.RBF(),
+    #     position_memory=position_memory,
+    #     control_memory=control_memory,
+    # )
+    model = IMSVGPR(
         states=states_array,
         actions=actions_array,
-        kernel_funcs=ExpSquared,
-        params=model_params,
+        kernel_funcs=gpjax.kernels.RBF(),
+        num_inducing_points=num_inducing_points,
         position_memory=position_memory,
         control_memory=control_memory,
     )
-    if trial == 0:
-        num_policy_opt_steps = 2000
-        model_params = model_params
-    else:
-        num_policy_opt_steps = 4000
-        model_params = model.params  # Start from previous model (?)
 
     start_time = time.perf_counter()
-    #model = optimize_imgpr(
-    #    model,
-    #    states=states_array,
-    #    actions=actions_array,
-    #)
-    #end_time = time.perf_counter()
-    #print(f"Model Optimization Time = {end_time-start_time}")
+    # model = optimize_imgpr(
+    #     model,
+    #     states=states_array,
+    #     actions=actions_array,
+    # )
+    optimize_model = optimize_imsvgpr(
+        model,
+        states=states_array,
+        actions=actions_array,
+    )
+    end_time = time.perf_counter()
+    print(f"Model Optimization Time = {end_time-start_time}")
 
     # Set up Optimizer for Policy Optimization
     factor = min(1.0, max(0.0, (trial - 5) / 20.0))
@@ -196,52 +191,54 @@ for trial in range(num_trials):
     optimizer = optax.adam(learning_rate=cosine_decay_scheduler)
     # Initialize some particles to run cost
     key, subkey = jr.split(key)
-    #states_train, actions_train = sample_from_environment(
-    #    env,
-    #    timesteps[: max(model.position_memory, model.control_memory) + 1],
-    #    1,
-    #    control_policy,
-    #    model=model,
-    #    key=subkey,
-    #)
-    #initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
-    #initial_states = jnp.tile(
-    #    jnp.array(states_train, dtype=jnp.float64), (num_particles, 1, 1)
-    #)
+    states_train, actions_train = sample_from_environment(
+        env,
+        timesteps[: max(model.position_memory, model.control_memory) + 1],
+        1,
+        control_policy,
+        model=model,
+        key=subkey,
+    )
+    initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
+    initial_states = jnp.tile(
+        jnp.array(states_train, dtype=jnp.float64), (num_particles, 1, 1)
+    )
+    breakpoint()
 
     # Compute cost
-    #initial_mu = []
-    #initial_std = []
-    #for i in range(10):
-    #    key, subkey = jr.split(key)
-    #    mu, sig = policy_rollout_with_std(
-    #        control_policy, initial_states, initial_actions, model, timesteps, subkey
-    #    )
-    #    initial_mu.append(mu)
-    #    initial_std.append(jnp.square(sig))
-    #initial_mu = jnp.mean(jnp.array(initial_mu))
-    #initial_std = jnp.sqrt(jnp.mean(jnp.array(initial_std)))
-    #print(f"Current cost and std = {initial_mu.item(),initial_std.item()}")
+    initial_mu = []
+    initial_std = []
+    for i in range(10):
+        key, subkey = jr.split(key)
+        mu, sig = policy_rollout_with_std(
+            control_policy, initial_states, initial_actions, model, timesteps, subkey
+        )
+        initial_mu.append(mu)
+        initial_std.append(jnp.square(sig))
+    initial_mu = jnp.mean(jnp.array(initial_mu))
+    initial_std = jnp.sqrt(jnp.mean(jnp.array(initial_std)))
+    print(f"Current cost and std = {initial_mu.item(),initial_std.item()}")
+    breakpoint()
 
     # Optimize Policy using fitted GP model
-    #start_time = time.perf_counter()
-    #key, subkey = jr.split(key)
-    #control_policy = fit_controller(
-    #    policy=control_policy,
-    #    init_states=initial_states,
-    #    init_actions=initial_actions,
-    #    timesteps=timesteps,
-    #    gp_model=model,
-    #    obj_func=pendulum_cost,
-    #    optim=optimizer,
-    #    key=subkey,
-    #    max_steps=num_policy_opt_steps,
-    #)
-    #end_time = time.perf_counter()
-    #print(f"Policy Optimization Time = {end_time-start_time}")
+    start_time = time.perf_counter()
+    key, subkey = jr.split(key)
+    control_policy = fit_controller(
+        policy=control_policy,
+        init_states=initial_states,
+        init_actions=initial_actions,
+        timesteps=timesteps,
+        gp_model=model,
+        obj_func=pendulum_cost,
+        optim=optimizer,
+        key=subkey,
+        max_steps=num_policy_opt_steps,
+    )
+    end_time = time.perf_counter()
+    print(f"Policy Optimization Time = {end_time-start_time}")
 
     # Explore with optimized control policy going forward
-    #exploration_policy = control_policy
+    exploration_policy = control_policy
 env.close()
 
 breakpoint()
@@ -286,4 +283,3 @@ save_video(
     fps=env_test.metadata["render_fps"],
 )
 env_test.close()
-
