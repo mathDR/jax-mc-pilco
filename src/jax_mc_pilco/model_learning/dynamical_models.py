@@ -367,7 +367,7 @@ def optimize_imgpr(
             model=dynamical_model.models[i],
             objective=lambda p, d: -gpjax.objectives.conjugate_mll(p, d),
             train_data=dynamical_model.data[i],
-            trainable=gpjax.parameters.Parameter,
+            # trainable=gpjax.parameters.Parameter,
         )
         opt_models.append(opt_model)
 
@@ -397,7 +397,7 @@ def optimize_imsvgpr(
             model=dynamical_model.models[i],
             objective=lambda p, d: -gpjax.objectives.collapsed_elbo(p, d),
             train_data=dynamical_model.data[i],
-            trainable=gpjax.parameters.Parameter,
+            # trainable=gpjax.parameters.Parameter,
         )
         opt_models.append(opt_model)
         inducing_points.append(opt_model.inducing_inputs.value)
