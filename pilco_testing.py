@@ -36,6 +36,8 @@ T_control = 3.0
 sim_timestep = 0.01
 num_basis = 200
 umax = 2.0
+num_inducing_points = 250
+
 
 position_memory = 2
 control_memory = 1
@@ -150,7 +152,7 @@ for trial in range(num_trials):
 
     states_array = jnp.array(states)
     actions_array = jnp.array(actions)
-
+    print(states_array.shape)
     # Initialize and Fit the GP Model
     model = IMGPR(
         states=states_array,
@@ -168,13 +170,13 @@ for trial in range(num_trials):
         model_params = model.params  # Start from previous model (?)
 
     start_time = time.perf_counter()
-    model = optimize_imgpr(
-        model,
-        states=states_array,
-        actions=actions_array,
-    )
-    end_time = time.perf_counter()
-    print(f"Model Optimization Time = {end_time-start_time}")
+    #model = optimize_imgpr(
+    #    model,
+    #    states=states_array,
+    #    actions=actions_array,
+    #)
+    #end_time = time.perf_counter()
+    #print(f"Model Optimization Time = {end_time-start_time}")
 
     # Set up Optimizer for Policy Optimization
     factor = min(1.0, max(0.0, (trial - 5) / 20.0))
@@ -194,52 +196,52 @@ for trial in range(num_trials):
     optimizer = optax.adam(learning_rate=cosine_decay_scheduler)
     # Initialize some particles to run cost
     key, subkey = jr.split(key)
-    states_train, actions_train = sample_from_environment(
-        env,
-        timesteps[: max(model.position_memory, model.control_memory) + 1],
-        1,
-        control_policy,
-        model=model,
-        key=subkey,
-    )
-    initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
-    initial_states = jnp.tile(
-        jnp.array(states_train, dtype=jnp.float64), (num_particles, 1, 1)
-    )
+    #states_train, actions_train = sample_from_environment(
+    #    env,
+    #    timesteps[: max(model.position_memory, model.control_memory) + 1],
+    #    1,
+    #    control_policy,
+    #    model=model,
+    #    key=subkey,
+    #)
+    #initial_actions = jnp.tile(jnp.array(actions_train), (num_particles, 1, 1))
+    #initial_states = jnp.tile(
+    #    jnp.array(states_train, dtype=jnp.float64), (num_particles, 1, 1)
+    #)
 
     # Compute cost
-    initial_mu = []
-    initial_std = []
-    for i in range(10):
-        key, subkey = jr.split(key)
-        mu, sig = policy_rollout_with_std(
-            control_policy, initial_states, initial_actions, model, timesteps, subkey
-        )
-        initial_mu.append(mu)
-        initial_std.append(jnp.square(sig))
-    initial_mu = jnp.mean(jnp.array(initial_mu))
-    initial_std = jnp.sqrt(jnp.mean(jnp.array(initial_std)))
-    print(f"Current cost and std = {initial_mu.item(),initial_std.item()}")
+    #initial_mu = []
+    #initial_std = []
+    #for i in range(10):
+    #    key, subkey = jr.split(key)
+    #    mu, sig = policy_rollout_with_std(
+    #        control_policy, initial_states, initial_actions, model, timesteps, subkey
+    #    )
+    #    initial_mu.append(mu)
+    #    initial_std.append(jnp.square(sig))
+    #initial_mu = jnp.mean(jnp.array(initial_mu))
+    #initial_std = jnp.sqrt(jnp.mean(jnp.array(initial_std)))
+    #print(f"Current cost and std = {initial_mu.item(),initial_std.item()}")
 
     # Optimize Policy using fitted GP model
-    start_time = time.perf_counter()
-    key, subkey = jr.split(key)
-    control_policy = fit_controller(
-        policy=control_policy,
-        init_states=initial_states,
-        init_actions=initial_actions,
-        timesteps=timesteps,
-        gp_model=model,
-        obj_func=pendulum_cost,
-        optim=optimizer,
-        key=subkey,
-        max_steps=num_policy_opt_steps,
-    )
-    end_time = time.perf_counter()
-    print(f"Policy Optimization Time = {end_time-start_time}")
+    #start_time = time.perf_counter()
+    #key, subkey = jr.split(key)
+    #control_policy = fit_controller(
+    #    policy=control_policy,
+    #    init_states=initial_states,
+    #    init_actions=initial_actions,
+    #    timesteps=timesteps,
+    #    gp_model=model,
+    #    obj_func=pendulum_cost,
+    #    optim=optimizer,
+    #    key=subkey,
+    #    max_steps=num_policy_opt_steps,
+    #)
+    #end_time = time.perf_counter()
+    #print(f"Policy Optimization Time = {end_time-start_time}")
 
     # Explore with optimized control policy going forward
-    exploration_policy = control_policy
+    #exploration_policy = control_policy
 env.close()
 
 breakpoint()
@@ -285,18 +287,3 @@ save_video(
 )
 env_test.close()
 
-# import gymnasium as gym
-# from gymnasium.utils.save_video import save_video
-# env = gym.make('LunarLander-v3', render_mode="rgb_array_list")
-# env.reset(seed=0)
-# for step_index in range(1000):
-#    action = env.action_space.sample()
-#    _, _, terminated, truncated, _ = env.step(action)
-#    if terminated or truncated:
-#       save_video(
-#          frames=env.render(),
-#          video_folder="videos",
-#          fps=env.metadata["render_fps"],
-#       )
-#       break
-# env.close()

@@ -100,9 +100,7 @@ def fit_controller(  # noqa: PLR0913
                 policy, in_axes=(0, None)
             )(policy_input, timestep)
             actions = update_actions(action, actions)
-            samples = jax.vmap(
-                model.get_samples, in_axes=(None, 0, 0, None)
-            )(subkey, states, actions, 1)
+            samples = model.get_samples(subkey, states, actions)
             states = update_states(samples, states)
             cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, action))))
 
