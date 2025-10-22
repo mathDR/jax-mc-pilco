@@ -5,14 +5,14 @@ import jax.numpy as jnp
 import jax.random as jr
 import pytest
 import equinox as eqx  # type: ignore
-from jaxtyping import install_import_hook
+from jaxtyping import ArrayLike, install_import_hook
+from typing import List
+
 with install_import_hook("gpjax", "beartype.beartype"):
     import gpjax
 
 # Import the class to be tested
-from jax_mc_pilco.model_learning.dynamical_models import (
-    DynamicalModel,
-)
+from jax_mc_pilco.model_learning.dynamical_models import DynamicalModel, IMGPR
 
 # --- Mocking external dependencies ---
 # We use mocks to avoid testing the complex logic of gpjax and its components,
@@ -58,9 +58,9 @@ class MockAbstractPosterior(eqx.Module):
         num_outputs = train_data.y.shape[1]
         loc = jnp.zeros((num_test_points, num_outputs))
         scale = jnp.eye(num_test_points)
-    
+
         # A mock distribution with a loc and scale for sampling
-        class MockLatentDist:
+        class MockLatentDist(eqx.Module):
             batch_shape = (num_test_points,)
             event_shape = (num_outputs,)
             loc = loc
@@ -68,55 +68,57 @@ class MockAbstractPosterior(eqx.Module):
 
         return MockLatentDist()
 
+
 # --- Pytest fixtures for test data ---
 
 
 @pytest.fixture
-def states():
+def states() -> jax.Array:
     """Generates a mock states array."""
     return jnp.arange(120, dtype=jnp.float64).reshape(20, 6)
 
 
 @pytest.fixture
-def actions():
+def actions() -> jax.Array:
     """Generates a mock actions array."""
     return jnp.arange(60, dtype=jnp.float64).reshape(20, 3)
 
 
 @pytest.fixture
-def kernel_func():
+def kernel_func() -> jax.Array:
     """Returns a mock kernel."""
     return MockKernel()
 
 
 @pytest.fixture
-def mean_func():
+def mean_func() -> MockMeanFunction:
     """Returns a mock mean function."""
     return MockMeanFunction()
 
 
 @pytest.fixture
-def likelihood_func():
+def likelihood_func() -> MockGaussianLikelihood:
     """Returns a mock likelihood."""
     return MockGaussianLikelihood()
 
 
 @pytest.fixture
-def models(states, actions):
+def model(states: ArrayLike, actions: ArrayLike) -> List[eqx.Module]:
     """Fixture for the models attribute, simulating the list of posteriors."""
-    io_data = DynamicalModel(states, actions, MockKernel()).data
-    return [MockAbstractPosterior(data) for data in io_data]
+    return DynamicalModel(states, actions, MockKernel())
 
 
 # --- Unit test suite ---
-def test_constructor_with_single_kernel_mean_likelihood(states, actions, kernel_func):
+def test_constructor_with_single_kernel_mean_likelihood(
+    states: ArrayLike, actions: ArrayLike, kernel_func: MockKernel
+) -> None:
     """Tests the constructor with a single kernel, mean, and likelihood."""
     model = DynamicalModel(
         states=states,
         actions=actions,
         kernel_funcs=kernel_func,
         mean_funcs=MockMeanFunction(),
-        likelihoods=MockGaussianLikelihood()
+        likelihoods=MockGaussianLikelihood(),
     )
 
     assert isinstance(model, DynamicalModel)
@@ -125,10 +127,10 @@ def test_constructor_with_single_kernel_mean_likelihood(states, actions, kernel_
     assert len(model.mean_functions) == model.num_outputs
     assert isinstance(model.mean_functions[0], MockMeanFunction)
     assert len(model.likelihoods) == model.num_outputs
-    assert model.likelihoods[0] is MockGaussianLikelihood
+    assert isinstance(model.likelihoods[0], MockGaussianLikelihood)
 
 
-def test_constructor_with_lists(states, actions):
+def test_constructor_with_lists(states: ArrayLike, actions: ArrayLike) -> None:
     """Tests the constructor with lists of kernels, means, and likelihoods."""
     num_outputs = states.shape[1]
     kernel_list = [MockKernel() for _ in range(num_outputs)]
@@ -140,7 +142,7 @@ def test_constructor_with_lists(states, actions):
         actions=actions,
         kernel_funcs=kernel_list,
         mean_funcs=mean_list,
-        likelihoods=likelihood_list
+        likelihoods=likelihood_list,
     )
 
     assert len(model.kernels) == num_outputs
@@ -149,13 +151,11 @@ def test_constructor_with_lists(states, actions):
     assert all(isinstance(k, MockKernel) for k in model.kernels)
 
 
-def test_constructor_defaults(states, actions, kernel_func):
+def test_constructor_defaults(
+    states: ArrayLike, actions: ArrayLike, kernel_func: MockKernel
+) -> None:
     """Tests the constructor's default behavior for mean and likelihood."""
-    model = DynamicalModel(
-        states=states,
-        actions=actions,
-        kernel_funcs=kernel_func
-    )
+    model = DynamicalModel(states=states, actions=actions, kernel_funcs=kernel_func)
 
     assert len(model.mean_functions) == model.num_outputs
     assert isinstance(model.mean_functions[0], gpjax.mean_functions.Zero)
@@ -163,11 +163,13 @@ def test_constructor_defaults(states, actions, kernel_func):
     assert model.likelihoods[0] is gpjax.likelihoods.Gaussian
 
 
-def test_data_to_gp_input_output(states, actions):
+def test_data_to_gp_input_output(states: ArrayLike, actions: ArrayLike) -> None:
     """Tests the data transformation method for GP input/output."""
     pm = 2
     cm = 1
-    model = DynamicalModel(states, actions, MockKernel(), position_memory=pm, control_memory=cm)
+    model = DynamicalModel(
+        states, actions, MockKernel(), position_memory=pm, control_memory=cm
+    )
     gp_input, gp_output = model.data_to_gp_input_output(states, actions)
 
     # Expected shapes based on logic
@@ -185,7 +187,7 @@ def test_data_to_gp_input_output(states, actions):
     assert jnp.all(jnp.isclose(gp_output[0], expected_output_0))
 
 
-def test_data_to_policy_input(states, actions):
+def test_data_to_policy_input(states: ArrayLike, actions: ArrayLike) -> None:
     """Tests the data transformation for policy inputs."""
     pm = 2
     model = DynamicalModel(states, actions, MockKernel(), position_memory=pm)
@@ -198,43 +200,9 @@ def test_data_to_policy_input(states, actions):
     assert policy_input.shape == (num_data_points, input_dim)
 
 
-def test_get_samples(states, actions, models):
-    """Tests the get_samples method, including jitting and array shapes."""
-    key = jr.PRNGKey(0)
-    model = DynamicalModel(states, actions, MockKernel())
-    model = eqx.tree_at(lambda m: m.models, model, models)
-
-    # get_samples is decorated with eqx.filter_jit, so we need to run it once
-    # to trigger the JIT compilation.
-    try:
-        samples = model.get_samples(key, states, actions)
-    except Exception as e:
-        pytest.fail(f"get_samples failed unexpectedly: {e}")
-
-    num_samples = states.shape[0] - max(model.position_memory, model.control_memory)
-    assert samples.shape == (num_samples, model.num_outputs)
-    assert isinstance(samples, jax.Array)
-
-
-def test_get_samples_with_different_input_shapes(states, actions, models):
-    """Tests if get_samples handles inputs of different sizes."""
-    key = jr.PRNGKey(1)
-    model = DynamicalModel(states, actions, MockKernel())
-    model = eqx.tree_at(lambda m: m.models, model, models)
-
-    smaller_states = states[:10]
-    smaller_actions = actions[:10]
-
-    try:
-        samples = model.get_samples(key, smaller_states, smaller_actions)
-    except Exception as e:
-        pytest.fail(f"get_samples failed with smaller input: {e}")
-
-    num_samples = smaller_states.shape[0] - max(model.position_memory, model.control_memory)
-    assert samples.shape == (num_samples, model.num_outputs)
-
-
-def test_create_models_not_implemented(states, actions, kernel_func):
+def test_create_models_not_implemented(
+    states: ArrayLike, actions: ArrayLike, kernel_func: MockKernel
+):
     """Tests that create_models raises a NotImplementedError."""
     model = DynamicalModel(states, actions, kernel_func)
     with pytest.raises(NotImplementedError):

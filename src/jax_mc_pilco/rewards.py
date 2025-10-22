@@ -21,11 +21,7 @@ def cart_pole_cost(
     return 1 - jnp.exp(
         -(jnp.square((pole_angle - target_theta) / lengthscales[0]))
         - (jnp.square((angle_velocity - target_theta_dot) / lengthscales[1]))
-        - (
-            jnp.square(
-                (cart_velocity - target_cart_velocity) / lengthscales[1]
-            )
-        )
+        - (jnp.square((cart_velocity - target_cart_velocity) / lengthscales[1]))
     )
 
 
@@ -45,7 +41,17 @@ def pendulum_cost(
     theta = jnp.atan2(y, x)
 
     return (
-        jnp.square(theta) +
-        0.1*jnp.square(angle_velocity) +
-        0.001*jnp.square(torque)
+        jnp.square(theta)
+        + 0.1 * jnp.square(angle_velocity)
+        + 0.001 * jnp.square(torque)
     )
+
+
+def unit_cost(
+    states_sequence: ArrayLike,
+) -> Array:
+    """
+    Returns 1 for any input
+    """
+
+    return 1.0

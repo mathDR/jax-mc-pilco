@@ -23,12 +23,8 @@ from jax_mc_pilco.model_learning.dynamical_models import (
     optimize_imgpr,
     optimize_imsvgpr,
 )
-from jax_mc_pilco.policy_learning.rollout import (
-    fit_controller, policy_rollout_with_std
-)
-from jax_mc_pilco.simulators.simulation import (
-    sample_from_environment, remake_state
-)
+from jax_mc_pilco.policy_learning.rollout import fit_controller, policy_rollout_with_std
+from jax_mc_pilco.simulators.simulation import sample_from_environment, remake_state
 
 config.update("jax_enable_x64", True)
 
@@ -92,9 +88,9 @@ for epoch in range(num_epochs):
     actions_array = jnp.array(actions, dtype=jnp.float64)
 
     if epoch == 0:
-        num_policy_opt_steps = 1000
+        num_policy_opt_steps = 10
     else:
-        num_policy_opt_steps = 1500
+        num_policy_opt_steps = 15
 
     # Initialize and Fit the GP Model
     # model = IMGPR(

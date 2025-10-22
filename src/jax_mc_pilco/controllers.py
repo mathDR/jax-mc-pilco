@@ -7,8 +7,8 @@ __all__ = [
     "RandomController",
     "LinearPolicy",
     "SumOfSinusoids",
-    "SumOfGaussians"
-    ]
+    "SumOfGaussians",
+]
 
 from typing import Callable, Tuple
 
@@ -63,6 +63,37 @@ class Controller(eqx.Module):
         Squash the inputs inside (-max_action, +max_action)
         """
         return self.max_action * jnp.tanh(action / self.max_action)
+
+
+class ZeroController(Controller):
+    """Returns a zero control."""
+
+    def __init__(
+        self,
+        state_dim: Int,
+        action_dim: Int,
+        to_squash: bool = False,
+        max_action: Float = 1.0,
+    ):
+        super().__init__(
+            state_dim,
+            action_dim,
+            to_squash,
+            max_action,
+        )
+
+    def __call__(
+        self,
+        state: ArrayLike,
+        time_for_action: Float,
+        key: ArrayLike | None = None,
+    ) -> Array:
+        """
+        Simple random action
+        IN: current state, time_for_action and key to use for random action
+        OUT: the action value (uniform in (-max_action,+max_action))
+        """
+        return 0.0
 
 
 class RandomController(Controller):
@@ -238,9 +269,7 @@ class SumOfSinusoids(Controller):
     ) -> Array:
         return self.f_squash(
             jnp.sum(
-                self.amplitudes * (
-                    jnp.sin(self.omega * timestep + self.phases)
-                    ),
+                self.amplitudes * (jnp.sin(self.omega * timestep + self.phases)),
                 axis=0,
             ).reshape(
                 self.action_dim,
@@ -288,7 +317,7 @@ class SumOfGaussians(Controller):
 
         # get initial log lengthscales
         if initial_log_lengthscales is None:
-            initial_log_lengthscales = 4.0*jnp.ones(self.state_dim)
+            initial_log_lengthscales = 4.0 * jnp.ones(self.state_dim)
         self.log_lengthscales = initial_log_lengthscales.reshape([1, -1])
 
         # get initial centers
@@ -338,10 +367,7 @@ class SumOfGaussians(Controller):
         norm_centers = self.centers / lengthscales
         # get the square distances
         distances = jnp.squeeze(
-            jnp.linalg.norm(
-                norm_states[:, None, :] - norm_centers[None, :, :],
-                axis=2
-                )
+            jnp.linalg.norm(norm_states[:, None, :] - norm_centers[None, :, :], axis=2)
         )
         rbf_activations = jnp.exp(-0.5 * jnp.square(distances))
         inputs = self.f_linear(rbf_activations).reshape(
