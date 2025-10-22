@@ -9,6 +9,127 @@ from typing import Callable, Tuple
 import jax.random as jr
 
 from jax_mc_pilco.controllers import Controller
+from jax_mc_pilco.simulators.simulation import remake_state
+
+
+def policy_rollout_with_std(
+    policy: Controller,
+    init_states: ArrayLike,
+    init_actions: ArrayLike,
+    model: eqx.Module,
+    timesteps: ArrayLike,
+    key: ArrayLike,
+    obj_func: Callable,
+) -> Tuple[Float, Float]:
+    """The function that produces the rollout.
+    It starts from the init_samples and utilizes the policy to
+    generate actions that allow for sampling from the model to
+    get the next samples.
+    """
+    p_params, p_static = eqx.partition(policy, eqx.is_array)
+
+    def update_actions(action: ArrayLike, actions: ArrayLike):
+        """Append action to the front of actions and pop off last actions
+        value.
+        """
+        return jnp.concatenate(
+            [action[:, jnp.newaxis, :], actions[:, :-1, :]], axis=1
+        )
+
+    def update_states(state: ArrayLike, states: ArrayLike):
+        """Append state to the front of states and pop off last
+            states value.
+        """
+        new_state = remake_state(state)
+        return jnp.concatenate(
+            [
+                new_state[:, jnp.newaxis, :],
+                states[:, :-1, :]
+            ],
+            axis=1
+        )
+
+    def one_rollout_step(
+        carry: Tuple[
+            ArrayLike,
+            ArrayLike,
+            ArrayLike,
+            ArrayLike,
+            Float,
+            Float
+        ],
+        timestep: Float,
+    ) -> Tuple[
+        Tuple[jax.Array, jax.Array, jax.Array, jax.Array, Float, Float],
+        Float
+    ]:
+        params, key, states, actions, total_cost, total_var = carry
+        policy = eqx.combine(params, p_static)
+        # Compute the action from the most recent state
+        policy_input = jax.vmap(
+            model.data_to_policy_input
+            )(states, actions)
+        action = jax.vmap(
+            policy, in_axes=(0, None)
+            )(policy_input, timestep)
+        actions = update_actions(action, actions)
+        key, subkey = jr.split(key)
+        samples = model.get_samples(subkey, states, actions)
+        states = update_states(samples, states)
+        full_cost = jax.vmap(obj_func)(jnp.hstack((samples, action)))
+        cost = jnp.mean(full_cost)
+        var = jnp.var(full_cost)
+
+        return (
+            (
+                params,
+                key,
+                states,
+                actions,
+                total_cost + cost,
+                total_var + var
+            ),
+            cost
+        )
+
+    total_cost = 0
+    total_var = 0
+    key, subkey = jr.split(key)
+    (_, _, _, _, total_cost, _), _ = jax.lax.scan(
+        one_rollout_step,
+        (
+            p_params,
+            subkey,
+            init_states,
+            init_actions,
+            total_cost,
+            total_var
+        ),
+        timesteps,
+    )
+    return total_cost, total_var
+
+
+def policy_rollout(
+    policy: Controller,
+    init_states: ArrayLike,
+    init_actions: ArrayLike,
+    model: eqx.Module,
+    timesteps: ArrayLike,
+    key: ArrayLike,
+    obj_func: Callable,
+) -> Float:
+    """Just return the mean of the policy rollout."""
+    mu, _ = policy_rollout_with_std(
+        policy,
+        init_states,
+        init_actions,
+        model,
+        timesteps,
+        key,
+        obj_func,
+    )
+    return mu
 
 
 @eqx.filter_jit
@@ -33,67 +154,6 @@ def fit_controller(  # noqa: PLR0913
     different particles.
     """
 
-    @eqx.debug.assert_max_traces(max_traces=2)
-    def rollout(
-        policy: Controller,
-        init_states: ArrayLike,
-        init_actions: ArrayLike,
-        model: eqx.Module,
-        timesteps: ArrayLike,
-        key: ArrayLike = jr.key(42),
-    ) -> Float:
-        """The function that produces the rollout.
-        It starts from the init_samples and utilizes the policy to
-        generate actions that allow for sampling from the model to
-        get the next samples.
-        """
-        p_params, p_static = eqx.partition(policy, eqx.is_array)
-
-        def update_actions(action: ArrayLike, actions: ArrayLike):
-            """Append action to the front of actions and pop off last actions
-            value.
-            """
-            return jnp.concatenate(
-                [action[:, jnp.newaxis, :], actions[:, :-1, :]], axis=1
-            )
-
-        def update_states(state: ArrayLike, states: ArrayLike):
-            """Append state to the front of states and pop off last states
-            value.
-            """
-            theta = jnp.atan2(state[:, 1], state[:, 0])
-            new_state = jnp.array(
-                [jnp.cos(theta), jnp.sin(theta), jnp.clip(state[:, 2], min=-8, max=8)]
-            ).T
-            return jnp.concatenate(
-                [new_state[:, jnp.newaxis, :], states[:, :-1, :]], axis=1
-            )
-
-        def one_rollout_step(
-            carry: Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float],
-            timestep: Float,
-        ) -> Tuple[Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, Float], Float]:
-            params, key, states, actions, total_cost = carry
-            policy = eqx.combine(params, p_static)
-            # Compute the action from the most recent state
-            policy_input = jax.vmap(model.data_to_policy_input)(states, actions)
-            action = jax.vmap(policy, in_axes=(0, None))(policy_input, timestep)
-            actions = update_actions(action, actions)
-            samples = model.get_samples(subkey, states, actions)
-            states = update_states(samples, states)
-            cost = jnp.mean(jax.vmap(obj_func)(jnp.hstack((samples, action))))
-
-            return (params, key, states, actions, total_cost + cost), cost
-
-        total_cost = 0
-        key, subkey = jr.split(key)
-        (_, _, _, _, total_cost), _ = jax.lax.scan(
-            one_rollout_step,
-            (p_params, subkey, init_states, init_actions, total_cost),
-            timesteps,
-        )
-        return total_cost
-
     opt_state = optim.init(eqx.filter(policy, eqx.is_array))
 
     # Optimization step.
@@ -115,16 +175,32 @@ def fit_controller(  # noqa: PLR0913
         ) = carry
         policy = eqx.combine(policy_params, policy_static)
         key, subkey = jr.split(key)
-        loss_gradient = eqx.filter_grad(rollout)(
-            policy, init_states, init_actions, gp_model, timesteps, subkey
+        loss_gradient = eqx.filter_grad(policy_rollout)(
+            policy,
+            init_states,
+            init_actions,
+            gp_model,
+            timesteps,
+            subkey,
+            obj_func
         )
-        updates, opt_state = optim.update(loss_gradient, opt_state, policy_params)
+        updates, opt_state = optim.update(
+            loss_gradient,
+            opt_state,
+            policy_params
+        )
         policy = eqx.apply_updates(policy, updates)
         policy_params = eqx.filter(policy, eqx.is_array)
 
         key, subkey = jr.split(key)
-        val_loss = rollout(
-            policy, init_states, init_actions, gp_model, timesteps, subkey
+        val_loss = policy_rollout(
+            policy,
+            init_states,
+            init_actions,
+            gp_model,
+            timesteps,
+            subkey,
+            obj_func
         )
 
         iterations_since_improvement = jax.lax.cond(
@@ -148,12 +224,14 @@ def fit_controller(  # noqa: PLR0913
         # we want the former.
         n = optax.tree_utils.tree_get_all_with_path(opt_state, "count")[0][1]
 
-        return (n == 0) | ((n < max_steps) & (iterations_since_improvement <= patience))
+        return (
+            (n == 0) |
+            (n < max_steps) & (iterations_since_improvement <= patience)
+        )
 
     # Optimisation loop
     policy_params, policy_static = eqx.partition(policy, eqx.is_array)
     key, subkey = jr.split(key)
-    breakpoint()
     policy_params, _, _, _, _ = jax.lax.while_loop(
         continue_fn,
         make_step,

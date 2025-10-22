@@ -1,6 +1,5 @@
 """Functions for interacting with the gymnasium environments."""
 
-import numpy as np
 import equinox as eqx  # type: ignore
 import gymnasium as gym  # type: ignore
 from jaxtyping import Array, ArrayLike, Int
@@ -8,16 +7,19 @@ from jax_mc_pilco.controllers import Controller
 import jax.random as jr
 from jax import config
 import jax.numpy as jnp
+import numpy as np
 from typing import Tuple
 
 config.update("jax_enable_x64", True)
 
 
 def remake_state(x):
-    # return x
-    theta = np.atan2(x[1], x[0])
-    return [np.cos(theta), np.sin(theta), np.clip(x[2], min=-8, max=8)]
-    # return np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
+    theta = jnp.atan2(x[..., 1], x[..., 0])
+    return jnp.array([
+        jnp.cos(theta),
+        jnp.sin(theta),
+        jnp.clip(x[..., 2], min=-8, max=8)
+    ]).T
 
 
 def sample_from_environment(
