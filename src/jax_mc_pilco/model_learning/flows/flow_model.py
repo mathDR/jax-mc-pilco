@@ -16,13 +16,13 @@ class FlowDynamics(eqx.Module):
     def __init__(self, key: jtp.Key[jtp.Array,""], state_dim: int, action_dim: int, flow_layers: int = 4):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        
+
         # Context consists of current state and taken action
         cond_dim = state_dim + action_dim
-        
+
         # Define a base distribution matching the state delta dimension
         base_dist = MultivariateNormal(loc=jnp.zeros(state_dim,, dtype=float), covariance=jnp.eye(state_dim, dtype=float),)
-        
+
         self.flow = coupling_flow(
             key=key,
             base_dist=base_dist,
