@@ -24,11 +24,11 @@ import jax.numpy as jnp
 Axis = Union[int, Sequence[int]]
 
 
-def softplus(X):
-    return jnp.log(1 + jnp.exp(X))
+def softplus(X: ArrayLike) -> Array:
+    return jax.nn.softplus(X)
 
 
-def softplus_inverse(X):
+def softplus_inverse(X: ArrayLike) -> Array:
     return jnp.log(jnp.exp(X) - 1)
 
 
@@ -39,6 +39,11 @@ class Kernel(eqx.Module):
     Subclasses should accept parameters in their ``__init__`` and then override
     :func:`Kernel.evaluate` with custom behavior.
     """
+
+    @property
+    def num_latent_gps(self) -> Int:
+        # In this case number of latent GPs (L) == output_dim (P)
+        return self.output_dim
 
     @abstractmethod
     def evaluate(self, X1: ArrayLike, X2: ArrayLike) -> jax.Array:

@@ -56,6 +56,7 @@ class Stationary(Kernel):
             also has a ``default_distance`` property that is used when
             ``distance`` isn't provided.
     """
+    output_dim: Int = eqx.field(default_factory=lambda: 1)
 
     coefficient: Array | float = eqx.field(
         default_factory=lambda: jnp.ones(())
