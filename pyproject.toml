@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "dm-tree>=0.1.8",
+    "flowjax>=9.0.0",
     "gpjax>=0.6.9",
     "jax>=0.4.30",
     "jupyter>=1.1.1",
