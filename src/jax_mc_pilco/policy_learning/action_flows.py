@@ -19,7 +19,7 @@ class FlowActor(eqx.Module):
 
     def __init__(
         self,
-        key: jtp.Key[jtp.Array, ""], # noqa: F722
+        key: jtp.Key[jtp.Array, ""],  # noqa: F722
         state_dim: int,
         action_dim: int,
         flow_layers: int = 4,

@@ -18,12 +18,17 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
+    "ale-py>=0.11.2",
     "dm-tree>=0.1.8",
+    "equinox>=0.11.10",
     "flowjax>=9.0.0",
     "gpjax>=0.6.9",
+    "gymnasium[all,box2d,classic-control]>=1.1.1", # <-- Removed 'ale' here
     "jax>=0.4.30",
+    "jaxtyping>=0.2.36",
     "jupyter>=1.1.1",
     "matplotlib>=3.9.4",
+    "mypy>=1.15.0",
     "notebook>=7.3.2",
 ]
 
@@ -54,7 +59,6 @@ build-backend = "hatchling.build"
 [tool.mypy]
 files = ["src"]
 disallow_untyped_defs = true
-disallow_any_unimported = true
 no_implicit_optional = true
 check_untyped_defs = true
 warn_return_any = true
@@ -125,3 +129,15 @@ skip_empty = true
 [tool.coverage.run]
 branch = true
 source = ["src"]
+
+[[tool.mypy.overrides]]
+module = [
+    "flowjax.*",
+    "jaxtyping.*",
+    "equinox.*",
+    "gpjax.*",
+    "jax.*"
+]
+ignore_missing_imports = true
+# This stops mypy from tracking unimported Any's leaking out from these specific libraries
+disallow_any_unimported = false
