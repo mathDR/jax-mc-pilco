@@ -1,4 +1,4 @@
-### Equinox Module that produces actions given a state using a CNF."""
+### Equinox Module that acts as a world model given actions."""
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -7,10 +7,10 @@ from flowjax.distributions import MultivariateNormal, Transformed
 from flowjax.flows import coupling_flow
 
 
-class FlowActor(eqx.Module):
+class FlowDynamics(eqx.Module):
     """
-    Conditional Normalizing Flow policy.
-    Maps noise z ~ N(0, I) -> Action given the context [s_{t-1}, s_t]
+    Conditional Normalizing Flow dynamics model.
+    Maps noise z ~ N(0, I) -> Delta State given the context [s_t, a_t]
     """
 
     flow: Transformed
@@ -22,50 +22,50 @@ class FlowActor(eqx.Module):
         key: jtp.Key[jtp.Array, ""],  # noqa: F722
         state_dim: int,
         action_dim: int,
-        flow_layers: int = 4,
+        flow_layers: int,
+        flow: Transformed | None,
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
 
-        # Context consists of the last two states concatenated
-        cond_dim = state_dim * 2
+        # Context consists of current state and taken action
+        cond_dim = state_dim + action_dim
 
-        # Define a standard Gaussian base distribution matching the action dimension
+        # Define a base distribution matching the state delta dimension
         base_dist = MultivariateNormal(
-            loc=jnp.zeros(
-                action_dim,
-            ),
-            covariance=jnp.eye(
-                action_dim,
-            ),
+            loc=jnp.zeros(state_dim, dtype=float),
+            covariance=jnp.eye(state_dim, dtype=float),
         )
+        if flow is not None:
+            self.flow = flow
+        else:
+            self.flow = coupling_flow(
+                key=key,
+                base_dist=base_dist,
+                cond_dim=cond_dim,
+                nn_width=256,
+                nn_depth=2,
+                flow_layers=flow_layers,
+            )
 
-        # Build the conditional flow using rational quadratic splines
-        self.flow = coupling_flow(
-            key=key,
-            base_dist=base_dist,
-            cond_dim=cond_dim,
-            nn_width=256,
-            nn_depth=2,
-            flow_layers=flow_layers,
-        )
-
-    def sample_action(
+    def predict_next_state(
         self,
         key: jtp.Key[jtp.Array, ""],  # noqa: F722
-        prev_state: jax.Array,
-        curr_state: jax.Array,
+        s_curr: jax.Array,
+        action: jax.Array,
     ) -> jax.Array:
-        """Samples a multi-modal action strategy given the history context."""
-        context = jnp.concatenate([prev_state, curr_state], axis=-1)
-        return self.flow.sample(key, condition=context)
+        """Samples a structural residual transition delta and adds it to s_t."""
+        context = jnp.concatenate([s_curr, action], axis=-1)
+        delta_s = self.flow.sample(key, condition=context)
+        return s_curr + delta_s
 
     def log_prob(
         self,
+        s_next: jax.Array,
+        s_curr: jax.Array,
         action: jax.Array,
-        prev_state: jax.Array,
-        curr_state: jax.Array,
     ) -> jax.Array:
-        """Calculates exact log-likelihood log p(a | s_prev, s_curr) for optimization."""
-        context = jnp.concatenate([prev_state, curr_state], axis=-1)
-        return self.flow.log_prob(action, condition=context)
+        """Calculates exact log-likelihood of the state delta given the context."""
+        context = jnp.concatenate([s_curr, action], axis=-1)
+        delta_s = s_next - s_curr
+        return self.flow.log_prob(delta_s, condition=context)
