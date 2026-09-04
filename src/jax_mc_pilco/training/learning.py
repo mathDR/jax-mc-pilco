@@ -46,7 +46,7 @@ def generate_sobol_initial_states(
     l_bounds: np.ndarray,
     u_bounds: np.ndarray,
     *,
-    seed: int=42,
+    seed: int = 42,
 ) -> np.ndarray:
     """Generates low-discrepancy physical states for InvertedDoublePendulum-v4."""
     # 1. Dimensions: 1 cart pos, 2 link angles, 1 cart vel, 2 link angular vels = 6 dimensions
@@ -127,10 +127,10 @@ def collect_experience(
     """
     max_steps = num_steps if exploration else 1
 
-    actions = []
-    states = []
-    next_states = []
-    rewards = []
+    actions: list = []
+    states: list = []
+    next_states: list = []
+    rewards: list = []
     max_episode_length = 0
     total_reward = 0.0
 
@@ -288,7 +288,9 @@ def train_reward(
         num_iters=num_iters,
         key=subkey,
     )
-    gp_predictor: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]] = make_sparse_predictive_function(opt_svgp, train_data=dataset)
+    gp_predictor: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]] = (
+        make_sparse_predictive_function(opt_svgp, train_data=dataset)
+    )
     return gp_predictor
 
 

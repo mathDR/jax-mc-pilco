@@ -3,7 +3,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
-from flowjax.bijections import Affine, Chain, Sigmoid
 from flowjax.distributions import MultivariateNormal, Transformed
 from flowjax.flows import coupling_flow
 
@@ -21,12 +20,14 @@ class FlowDynamics(eqx.Module):
 
     def __init__(
         self,
-        key: jtp.Key[jtp.Array, ""],  # noqa: F722
+        key: jtp.Key[jtp.Array, ""],
         state_dim: int,
         action_dim: int,
         state_low: jax.Array,
         state_high: jax.Array,
         flow_layers: int = 4,
+        *,
+        base_flow: Transformed | None = None,
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -34,31 +35,34 @@ class FlowDynamics(eqx.Module):
         # Context consists of current state and taken action
         cond_dim = state_dim + action_dim
 
-        # Define a base distribution matching the state delta dimension
-        base_dist = MultivariateNormal(
-            loc=jnp.zeros(state_dim, dtype=float),
-            covariance=jnp.eye(state_dim, dtype=float),
-        )
+        if base_flow is None:
+            # Define a base distribution matching the state delta dimension
+            base_dist = MultivariateNormal(
+                loc=jnp.zeros(state_dim, dtype=float),
+                covariance=jnp.eye(state_dim, dtype=float),
+            )
 
-        self.base_flow = coupling_flow(
-            key=key,
-            base_dist=base_dist,
-            cond_dim=cond_dim,
-            nn_width=256,
-            nn_depth=2,
-            flow_layers=flow_layers,
-        )
+            self.base_flow = coupling_flow(
+                key=key,
+                base_dist=base_dist,
+                cond_dim=cond_dim,
+                nn_width=256,
+                nn_depth=2,
+                flow_layers=flow_layers,
+            )
+        else:
+            self.base_flow = base_flow
         # Sigmoid: R -> (0, 1); then affine: (0, 1) -> (low, high)
         # loc = state_low - 1e-7
         # scale = state_high - state_low
         # squash = Chain([Sigmoid(shape=(state_dim,)), Affine(loc=loc, scale=scale)])
 
-        #self.flow = Transformed(self.base_flow, squash)
+        # self.flow = Transformed(self.base_flow, squash)
         self.flow = self.base_flow
 
     def predict_next_state(
         self,
-        key: jtp.Key[jtp.Array, ""],  # noqa: F722
+        key: jtp.Key[jtp.Array, ""],
         s_curr: jax.Array,
         action: jax.Array,
     ) -> jax.Array:

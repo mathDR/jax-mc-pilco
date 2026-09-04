@@ -1,3 +1,6 @@
+# Global exclude pattern
+exclude: ^.*\.ipynb$
+
 repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
     # uv version.
@@ -19,12 +22,6 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.3.0
-    hooks:
-      - id: mypy
-        additional_dependencies: []
 
   - repo: https://github.com/astral-sh/ty-pre-commit
     rev: v0.0.69

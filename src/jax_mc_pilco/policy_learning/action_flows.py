@@ -20,7 +20,7 @@ class FlowActor(eqx.Module):
 
     def __init__(
         self,
-        key: jtp.Key[jtp.Array, ""],  # noqa: F722
+        key: jtp.Key[jtp.Array, ""],
         state_dim: int,
         action_dim: int,
         action_low: jax.Array,
@@ -57,7 +57,7 @@ class FlowActor(eqx.Module):
 
     def sample_action(
         self,
-        key: jtp.Key[jtp.Array, ""],  # noqa: F722
+        key: jtp.Key[jtp.Array, ""],
         prev_state: jax.Array,
         curr_state: jax.Array,
     ) -> jax.Array:
