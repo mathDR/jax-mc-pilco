@@ -3,6 +3,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
+from flowjax.bijections import Affine, Chain, Sigmoid
 from flowjax.distributions import MultivariateNormal, Transformed
 from flowjax.flows import coupling_flow
 
@@ -14,6 +15,7 @@ class FlowDynamics(eqx.Module):
     """
 
     flow: Transformed
+    base_flow: Transformed
     state_dim: int
     action_dim: int
 
@@ -22,6 +24,8 @@ class FlowDynamics(eqx.Module):
         key: jtp.Key[jtp.Array, ""],  # noqa: F722
         state_dim: int,
         action_dim: int,
+        state_low: jax.Array,
+        state_high: jax.Array,
         flow_layers: int = 4,
     ):
         self.state_dim = state_dim
@@ -36,7 +40,7 @@ class FlowDynamics(eqx.Module):
             covariance=jnp.eye(state_dim, dtype=float),
         )
 
-        self.flow = coupling_flow(
+        self.base_flow = coupling_flow(
             key=key,
             base_dist=base_dist,
             cond_dim=cond_dim,
@@ -44,6 +48,13 @@ class FlowDynamics(eqx.Module):
             nn_depth=2,
             flow_layers=flow_layers,
         )
+        # Sigmoid: R -> (0, 1); then affine: (0, 1) -> (low, high)
+        # loc = state_low - 1e-7
+        # scale = state_high - state_low
+        # squash = Chain([Sigmoid(shape=(state_dim,)), Affine(loc=loc, scale=scale)])
+
+        #self.flow = Transformed(self.base_flow, squash)
+        self.flow = self.base_flow
 
     def predict_next_state(
         self,
@@ -58,11 +69,8 @@ class FlowDynamics(eqx.Module):
 
     def log_prob(
         self,
-        s_next: jax.Array,
-        s_curr: jax.Array,
-        action: jax.Array,
+        delta_s: jax.Array,
+        context: jax.Array,
     ) -> jax.Array:
         """Calculates exact log-likelihood of the state delta given the context."""
-        context = jnp.concatenate([s_curr, action], axis=-1)
-        delta_s = s_next - s_curr
         return self.flow.log_prob(delta_s, condition=context)

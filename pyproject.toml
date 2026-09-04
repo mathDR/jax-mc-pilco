@@ -23,13 +23,18 @@ dependencies = [
     "equinox>=0.11.10",
     "flowjax>=9.0.0",
     "gpjax>=0.6.9",
-    "gymnasium[all,box2d,classic-control]>=1.1.1", # <-- Removed 'ale' here
+    "gymnasium[all,box2d,classic-control]>=1.1.1",
+    "ipython>=8.18.1",
     "jax>=0.4.30",
     "jaxtyping>=0.2.36",
     "jupyter>=1.1.1",
     "matplotlib>=3.9.4",
+    "moviepy>=2.2.1",
     "mypy>=1.15.0",
     "notebook>=7.3.2",
+    "optax>=0.1.9",
+    "pygame>=2.6.1",
+    "scipy>=1.13.1",
 ]
 
 [project.urls]
@@ -111,6 +116,7 @@ ignore = [
     "E501",
     # DoNotAssignLambda
     "E731",
+    "F722",    # For the warning you get when you type a jaxtyping.Key...
 ]
 
 [tool.ruff.lint.per-file-ignores]

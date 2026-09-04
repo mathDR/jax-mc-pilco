@@ -53,8 +53,7 @@ class FlowActor(eqx.Module):
         scale = action_high - action_low
         squash = Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=scale)])
 
-        full_bijection = Chain([base_flow.bijection, squash])
-        self.flow = Transformed(base_dist, full_bijection)
+        self.flow = Transformed(base_flow, squash)
 
     def sample_action(
         self,
