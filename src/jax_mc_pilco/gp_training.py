@@ -3,7 +3,6 @@ import gpjax as gpx
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 from flowjax.distributions import MultivariateNormal, Transformed
 from flowjax.flows import coupling_flow

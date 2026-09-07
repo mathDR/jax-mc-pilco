@@ -6,6 +6,7 @@ Reward follows the classic Gymnasium `InvertedDoublePendulum-v4` shaping:
     reward = alive_bonus - dist_penalty - vel_penalty
 using the tip site position and the two pole angular velocities.
 """
+
 from __future__ import annotations
 
 import os
@@ -23,12 +24,10 @@ import jax.numpy as jnp
 import jaxtyping as jtp
 import mujoco
 import optax
-import paramax
-from flowjax.bijections import Affine, Chain, Sigmoid
-from flowjax.distributions import MultivariateNormal, Transformed
-from flowjax.flows import coupling_flow
 from mujoco import mjx
+
 from jax_mc_pilco.policy_learning.action_flows import FlowActor
+
 # ----------------------------------------------------------------------------
 # 1. Environment: MJCF with a `tip` site added for reward computation
 # ----------------------------------------------------------------------------
@@ -85,6 +84,7 @@ def reward_and_done(data: mjx.Data) -> tuple[jtp.Float[jtp.Array, ""], jtp.Bool[
     done = z <= FALL_HEIGHT
     return reward, done
 
+
 # ----------------------------------------------------------------------------
 # 3. Critic: simple MLP over the same [prev_state, curr_state] context
 # ----------------------------------------------------------------------------
@@ -92,9 +92,7 @@ class Critic(eqx.Module):
     mlp: eqx.nn.MLP
 
     def __init__(self, key, cond_dim: int):
-        self.mlp = eqx.nn.MLP(
-            in_size=cond_dim, out_size="scalar", width_size=128, depth=2, key=key
-        )
+        self.mlp = eqx.nn.MLP(in_size=cond_dim, out_size="scalar", width_size=128, depth=2, key=key)
 
     def __call__(self, prev_state, curr_state) -> jax.Array:
         context = jnp.concatenate([prev_state, curr_state], axis=-1)
@@ -138,9 +136,7 @@ def rollout(agent: Agent, data0: mjx.Data, prev0, key, n_steps: int):
         reset_data = reset_data.replace(qpos=reset_data.qpos + noise)
         reset_data = mjx.forward(mjx_model, reset_data)
         next_data = jax.tree_util.tree_map(
-            lambda reset, cur: jnp.where(done, reset, cur)
-            if eqx.is_array(reset) and reset.shape == cur.shape
-            else cur,
+            lambda reset, cur: jnp.where(done, reset, cur) if eqx.is_array(reset) and reset.shape == cur.shape else cur,
             reset_data,
             next_data,
         )
@@ -193,9 +189,7 @@ def compute_gae(rewards, values, dones, last_value, gamma: float = 0.99, lam: fl
         adv = delta + gamma * lam * nd * carry
         return adv, adv
 
-    _, advs_rev = jax.lax.scan(
-        scan_fn, jnp.array(0.0), (rewards, values, next_values, not_done), reverse=True
-    )
+    _, advs_rev = jax.lax.scan(scan_fn, jnp.array(0.0), (rewards, values, next_values, not_done), reverse=True)
     returns = advs_rev + values
     return advs_rev, returns
 
@@ -204,9 +198,7 @@ def compute_gae(rewards, values, dones, last_value, gamma: float = 0.99, lam: fl
 # 6. PPO loss and update
 # ----------------------------------------------------------------------------
 def ppo_loss(agent: Agent, batch, clip_eps: float, vf_coef: float, ent_coef: float):
-    new_logp = jax.vmap(agent.actor.log_prob)(
-        batch["action"], batch["prev_state"], batch["curr_state"]
-    )
+    new_logp = jax.vmap(agent.actor.log_prob)(batch["action"], batch["prev_state"], batch["curr_state"])
     # The sigmoid-squash bijection's log-density diverges for samples that land
     # very close to the action bounds. Clamp to keep the PPO ratio finite -
     # this is the same trick used for tanh-squashed Gaussian policies in SAC.
@@ -232,9 +224,7 @@ def ppo_loss(agent: Agent, batch, clip_eps: float, vf_coef: float, ent_coef: flo
 
 @eqx.filter_jit
 def ppo_minibatch_step(agent, opt_state, optimizer, mb, clip_eps, vf_coef, ent_coef):
-    (loss, info), grads = eqx.filter_value_and_grad(ppo_loss, has_aux=True)(
-        agent, mb, clip_eps, vf_coef, ent_coef
-    )
+    (loss, info), grads = eqx.filter_value_and_grad(ppo_loss, has_aux=True)(agent, mb, clip_eps, vf_coef, ent_coef)
     updates, new_opt_state = optimizer.update(grads, opt_state, agent)
     new_agent = eqx.apply_updates(agent, updates)
 
@@ -273,9 +263,7 @@ def ppo_update_epoch(agent, opt_state, optimizer, batch, perm, minibatch_size, c
     for i in range(n_minibatches):
         mb_idx = perm[i * minibatch_size : (i + 1) * minibatch_size]
         mb = jax.tree_util.tree_map(lambda x: x[mb_idx], batch)
-        agent, opt_state, loss, info = ppo_minibatch_step(
-            agent, opt_state, optimizer, mb, clip_eps, vf_coef, ent_coef
-        )
+        agent, opt_state, loss, info = ppo_minibatch_step(agent, opt_state, optimizer, mb, clip_eps, vf_coef, ent_coef)
         losses.append(loss)
         infos.append(info)
     infos = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *infos)
@@ -375,9 +363,7 @@ def eval_rollout_qpos(agent: Agent, key: jax.Array, n_steps: int, temperature: f
 
     data0 = mjx.forward(mjx_model, mjx.make_data(mjx_model))
     keys = jax.random.split(key, n_steps)
-    _, (qpos_traj, rewards, dones) = jax.lax.scan(
-        step, (data0, obs_from_data(data0)), keys
-    )
+    _, (qpos_traj, rewards, dones) = jax.lax.scan(step, (data0, obs_from_data(data0)), keys)
     return qpos_traj, rewards, dones
 
 
@@ -445,10 +431,14 @@ def render_video(
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         subprocess.run(
             [
-                ffmpeg, "-y",
-                "-framerate", str(fps),
-                "-i", f"{tmpdir}/frame_%05d.png",
-                "-pix_fmt", "yuv420p",
+                ffmpeg,
+                "-y",
+                "-framerate",
+                str(fps),
+                "-i",
+                f"{tmpdir}/frame_%05d.png",
+                "-pix_fmt",
+                "yuv420p",
                 path,
             ],
             check=True,

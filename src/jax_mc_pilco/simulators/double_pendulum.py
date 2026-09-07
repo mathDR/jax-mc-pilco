@@ -6,6 +6,7 @@ Reward follows the classic Gymnasium `InvertedDoublePendulum-v4` shaping:
     reward = alive_bonus - dist_penalty - vel_penalty
 using the tip site position and the two pole angular velocities.
 """
+
 from __future__ import annotations
 
 import equinox as eqx
@@ -75,6 +76,7 @@ def reward_and_done(data: mjx.Data) -> tuple[jtp.Float[jtp.Array, ""], jtp.Bool[
     done = z <= FALL_HEIGHT
     return reward, done
 
+
 # ----------------------------------------------------------------------------
 # 3. Critic: simple MLP over the same [prev_state, curr_state] context
 # ----------------------------------------------------------------------------
@@ -82,18 +84,13 @@ class Critic(eqx.Module):
     mlp: eqx.nn.MLP
 
     def __init__(
-        self, key: jtp.Key[jtp.Array, ""],
+        self,
+        key: jtp.Key[jtp.Array, ""],
         cond_dim: int,
     ):
-        self.mlp = eqx.nn.MLP(
-            in_size=cond_dim, out_size="scalar", width_size=128, depth=2, key=key
-        )
+        self.mlp = eqx.nn.MLP(in_size=cond_dim, out_size="scalar", width_size=128, depth=2, key=key)
 
-    def __call__(
-        self,
-        prev_state: jax.Array,
-        curr_state: jax.Array
-    ) -> jax.Array:
+    def __call__(self, prev_state: jax.Array, curr_state: jax.Array) -> jax.Array:
         context = jnp.concatenate([prev_state, curr_state], axis=-1)
         return self.mlp(context)
 
@@ -115,13 +112,15 @@ def make_initial_carry(key: jtp.Key[jtp.Array, ""]) -> tuple[jax.Array, jax.Arra
 
 @eqx.filter_jit
 def rollout(
-    agent: Agent,
-    data0: mjx.Data,
-    prev0: jax.Array,
-    key: jtp.Key[jtp.Array, ""],
-    n_steps: int
+    agent: Agent, data0: mjx.Data, prev0: jax.Array, key: jtp.Key[jtp.Array, ""], n_steps: int
 ) -> tuple[dict, jax.Array]:
-    def step(carry: tuple, key: jtp.Key[jtp.Array, ""],) -> tuple[tuple, dict,]:
+    def step(
+        carry: tuple,
+        key: jtp.Key[jtp.Array, ""],
+    ) -> tuple[
+        tuple,
+        dict,
+    ]:
         data, prev_state = carry
         curr_state = obs_from_data(data)
         sample_key, reset_key = jax.random.split(key)
@@ -141,9 +140,7 @@ def rollout(
         reset_data = reset_data.replace(qpos=reset_data.qpos + noise)
         reset_data = mjx.forward(mjx_model, reset_data)
         next_data = jax.tree_util.tree_map(
-            lambda reset, cur: jnp.where(done, reset, cur)
-            if eqx.is_array(reset) and reset.shape == cur.shape
-            else cur,
+            lambda reset, cur: jnp.where(done, reset, cur) if eqx.is_array(reset) and reset.shape == cur.shape else cur,
             reset_data,
             next_data,
         )
@@ -174,7 +171,9 @@ def rollout(
 def batched_rollout(agent: Agent, keys: jtp.Key[jtp.Array, ""], n_steps: int) -> tuple:
     """keys: shape [B] of per-env PRNG keys."""
 
-    def one_env(key: jtp.Key[jtp.Array, ""],) -> tuple[dict, jax.Array]:
+    def one_env(
+        key: jtp.Key[jtp.Array, ""],
+    ) -> tuple[dict, jax.Array]:
         init_key, roll_key = jax.random.split(key)
         data0, prev0 = make_initial_carry(init_key)
         return rollout(agent, data0, prev0, roll_key, n_steps)
@@ -191,7 +190,7 @@ def compute_gae(
     dones: jax.Array,
     last_value: jax.Array,
     gamma: float = 0.99,
-    lam: float = 0.95
+    lam: float = 0.95,
 ) -> tuple[jax.Array, jax.Array]:
     """rewards/values/dones: [T] for a single env. Returns advantages, returns: [T]."""
     not_done = 1.0 - dones.astype(jnp.float32)
@@ -203,9 +202,7 @@ def compute_gae(
         adv = delta + gamma * lam * nd * carry
         return adv, adv
 
-    _, advs_rev = jax.lax.scan(
-        scan_fn, jnp.array(0.0), (rewards, values, next_values, not_done), reverse=True
-    )
+    _, advs_rev = jax.lax.scan(scan_fn, jnp.array(0.0), (rewards, values, next_values, not_done), reverse=True)
     returns = advs_rev + values
     return advs_rev, returns
 
@@ -213,10 +210,14 @@ def compute_gae(
 # ----------------------------------------------------------------------------
 # 6. PPO loss and update
 # ----------------------------------------------------------------------------
-def ppo_loss(agent: Agent, batch: jax.Array, clip_eps: float, vf_coef: float, ent_coef: float,) -> tuple[jax.Array, dict]:
-    new_logp = jax.vmap(agent.actor.log_prob)(
-        batch["action"], batch["prev_state"], batch["curr_state"]
-    )
+def ppo_loss(
+    agent: Agent,
+    batch: jax.Array,
+    clip_eps: float,
+    vf_coef: float,
+    ent_coef: float,
+) -> tuple[jax.Array, dict]:
+    new_logp = jax.vmap(agent.actor.log_prob)(batch["action"], batch["prev_state"], batch["curr_state"])
     # The sigmoid-squash bijection's log-density diverges for samples that land
     # very close to the action bounds. Clamp to keep the PPO ratio finite -
     # this is the same trick used for tanh-squashed Gaussian policies in SAC.
@@ -242,17 +243,9 @@ def ppo_loss(agent: Agent, batch: jax.Array, clip_eps: float, vf_coef: float, en
 
 @eqx.filter_jit
 def ppo_minibatch_step(
-    agent: Agent,
-    opt_state: optax.OptState,
-    optimizer: optax.GradientTransformation,
-    mb,
-    clip_eps,
-    vf_coef,
-    ent_coef
+    agent: Agent, opt_state: optax.OptState, optimizer: optax.GradientTransformation, mb, clip_eps, vf_coef, ent_coef
 ) -> tuple[Agent, optax.OptState, jax.Array, jax.Array]:
-    (loss, info), grads = eqx.filter_value_and_grad(ppo_loss, has_aux=True)(
-        agent, mb, clip_eps, vf_coef, ent_coef
-    )
+    (loss, info), grads = eqx.filter_value_and_grad(ppo_loss, has_aux=True)(agent, mb, clip_eps, vf_coef, ent_coef)
     updates, new_opt_state = optimizer.update(grads, opt_state, agent)
     new_agent = eqx.apply_updates(agent, updates)
 
@@ -290,9 +283,7 @@ def ppo_update_epoch(agent, opt_state, optimizer, batch, perm, minibatch_size, c
     for i in range(n_minibatches):
         mb_idx = perm[i * minibatch_size : (i + 1) * minibatch_size]
         mb = jax.tree_util.tree_map(lambda x: x[mb_idx], batch)
-        agent, opt_state, loss, info = ppo_minibatch_step(
-            agent, opt_state, optimizer, mb, clip_eps, vf_coef, ent_coef
-        )
+        agent, opt_state, loss, info = ppo_minibatch_step(agent, opt_state, optimizer, mb, clip_eps, vf_coef, ent_coef)
         losses.append(loss)
         infos.append(info)
     infos = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *infos)
@@ -367,7 +358,7 @@ def train(
 def eval_rollout_qpos(agent: Agent, key: jax.Array, n_steps: int):
     """Single-env rollout (stochastic actions from the trained flow) returning
     the qpos trajectory needed for rendering, plus reward/done for reporting."""
- 
+
     def step(carry, key):
         data, prev_state = carry
         curr_state = obs_from_data(data)
@@ -375,12 +366,10 @@ def eval_rollout_qpos(agent: Agent, key: jax.Array, n_steps: int):
         next_data = mjx.step(mjx_model, data.replace(ctrl=action))
         reward, done = reward_and_done(next_data)
         return (next_data, curr_state), (next_data.qpos, reward, done)
- 
+
     data0 = mjx.forward(mjx_model, mjx.make_data(mjx_model))
     keys = jax.random.split(key, n_steps)
-    _, (qpos_traj, rewards, dones) = jax.lax.scan(
-        step, (data0, obs_from_data(data0)), keys
-    )
+    _, (qpos_traj, rewards, dones) = jax.lax.scan(step, (data0, obs_from_data(data0)), keys)
     return qpos_traj, rewards, dones
 
 
@@ -400,12 +389,12 @@ def render_video(
     replayed frame-by-frame through the regular MuJoCo model just to draw it.
     """
     import imageio.v2 as imageio
- 
+
     key = jax.random.key(seed)
     qpos_traj, rewards, dones = eval_rollout_qpos(agent, key, n_steps)
     qpos_traj = jax.device_get(qpos_traj)
     fps = fps or int(round(1.0 / mj_model.opt.timestep))
- 
+
     render_data = mujoco.MjData(mj_model)
     renderer = mujoco.Renderer(mj_model, height=height, width=width)
     frames = []
@@ -415,9 +404,9 @@ def render_video(
         renderer.update_scene(render_data, camera=camera)
         frames.append(renderer.render())
     renderer.close()
- 
+
     imageio.mimwrite(path, frames, fps=fps, codec="libx264", quality=8)
- 
+
     mean_reward = float(jnp.mean(rewards))
     fell = bool(jnp.any(dones))
     fall_step = int(jnp.argmax(dones)) if fell else None
@@ -428,6 +417,7 @@ def render_video(
         + ")"
     )
     return path
+
 
 if __name__ == "__main__":
     trained_agent = train(n_envs=32, n_steps=200, n_iterations=200, ppo_epochs=10, minibatch_size=512)

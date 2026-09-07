@@ -23,7 +23,7 @@ class FlowActor(eqx.Module):
 
     def __init__(
         self,
-        key: jtp.Key[jtp.Array, ""],  # noqa: F722
+        key: jtp.Key[jtp.Array, ""],
         state_dim: int,
         action_dim: int,
         action_low: jax.Array,
@@ -57,9 +57,7 @@ class FlowActor(eqx.Module):
         # already-sampled action, log_prob for that action diverges.
         loc = action_low
         scale = action_high - action_low
-        squash = non_trainable(
-            Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=scale)])
-        )
+        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=scale)]))
         full_bijection = Chain([base_flow.bijection, squash])
         self.flow = Transformed(base_dist, full_bijection)
 
@@ -86,7 +84,7 @@ class FlowActor(eqx.Module):
     def sample_action_and_log_prob(
         self,
         key: jtp.Key[jtp.Array, ""],
-        prev_state: jax.Array, 
+        prev_state: jax.Array,
         curr_state: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         context = jnp.concatenate([prev_state, curr_state], axis=-1)
