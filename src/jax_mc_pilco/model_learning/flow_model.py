@@ -14,9 +14,6 @@ class FlowDynamics(eqx.Module):
 
     flow: Transformed
     memory: eqx.nn.GRUCell
-    base_flow: Transformed
-    state_dim: int
-    action_dim: int
     state_high: jax.Array
     state_low: jax.Array
 
@@ -32,9 +29,6 @@ class FlowDynamics(eqx.Module):
         *,
         base_flow: Transformed | None = None,
     ):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-
         # Context consists of current state and taken action
         cond_dim = state_dim + action_dim
 

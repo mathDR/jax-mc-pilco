@@ -1,21 +1,25 @@
 """Methods to train Flows and generate data."""
 
-import typing
+#import typing
 
 import equinox as eqx
-import gpjax as gpx
+
+# import gpjax as gpx
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
 import numpy as np
 import optax
-from flowjax.train import fit_to_data
+
+#from flowjax.train import fit_to_data
 from scipy.stats import qmc
 
 from jax_mc_pilco.model_learning.flow_model import FlowDynamics
 from jax_mc_pilco.policy_learning.action_flows import FlowActor
-from jax_mc_pilco.training.gprewards import build_sparse_sm_model, make_sparse_predictive_function
+
+#from jax_mc_pilco.training.gprewards import build_sparse_sm_model, make_sparse_predictive_function
+from jax_mc_pilco.training.loss import compute_batch_loss
 
 jax.config.update("jax_enable_x64", True)
 
@@ -193,213 +197,282 @@ def collect_experience(
     )
 
 
-def train_flow(
-    states: jax.Array,
-    actions: jax.Array,
-    next_states: jax.Array,
-    key: jtp.Key[jtp.Array, ""],
-    *,
-    flow: FlowDynamics | None = None,
-    flow_layers: int = 4,
-    learning_rate: float = 5e-3,
-    max_patience: int = 25,
-    max_epochs: int = 1000,
-    batch_size: int = 256,
-) -> tuple[FlowDynamics, dict[str, list]]:
-    """
-    Trains a model of the state distribution of the collected environmental
-    data.  If first time calling it, initalizes the model.  If subsequent
-    calls, it overrides the constraints of the flow with the updated data.
-    """
-    key, flow_key = jax.random.split(key)
-    if flow is None:
-        dynamics = FlowDynamics(
-            key=flow_key,
-            state_dim=states.shape[1],
-            action_dim=actions.shape[1],
-            state_low=jnp.min(states, axis=0),
-            state_high=jnp.max(states, axis=0),
-            flow_layers=flow_layers,
-        )
-    else:
-        dynamics = FlowDynamics(
-            key=flow_key,
-            state_dim=states.shape[1],
-            action_dim=actions.shape[1],
-            state_low=jnp.min(states, axis=0),
-            state_high=jnp.max(states, axis=0),
-            flow_layers=flow_layers,
-            base_flow=flow.base_flow,
-        )
-    # Build data for training flow
+# def train_flow(
+#     states: jax.Array,
+#     actions: jax.Array,
+#     next_states: jax.Array,
+#     key: jtp.Key[jtp.Array, ""],
+#     *,
+#     flow: FlowDynamics | None = None,
+#     flow_layers: int = 4,
+#     learning_rate: float = 5e-3,
+#     max_patience: int = 25,
+#     max_epochs: int = 1000,
+#     batch_size: int = 256,
+# ) -> tuple[FlowDynamics, dict[str, list]]:
+#     """
+#     Trains a model of the state distribution of the collected environmental
+#     data.  If first time calling it, initalizes the model.  If subsequent
+#     calls, it overrides the constraints of the flow with the updated data.
+#     """
+#     key, flow_key = jax.random.split(key)
+#     if flow is None:
+#         dynamics = FlowDynamics(
+#             key=flow_key,
+#             state_dim=states.shape[1],
+#             action_dim=actions.shape[1],
+#             state_low=jnp.min(states, axis=0),
+#             state_high=jnp.max(states, axis=0),
+#             flow_layers=flow_layers,
+#         )
+#     else:
+#         dynamics = FlowDynamics(
+#             key=flow_key,
+#             state_dim=states.shape[1],
+#             action_dim=actions.shape[1],
+#             state_low=jnp.min(states, axis=0),
+#             state_high=jnp.max(states, axis=0),
+#             flow_layers=flow_layers,
+#             base_flow=flow.base_flow,
+#         )
+#     # Build data for training flow
 
-    context = jnp.concatenate([states, actions], axis=-1)
+#     context = jnp.concatenate([states, actions], axis=-1)
 
-    key, train_key = jax.random.split(key)
-    train_flow, losses = fit_to_data(
-        key=train_key,
-        dist=dynamics,
-        data=(next_states, context),
-        learning_rate=learning_rate,
-        max_patience=max_patience,
-        max_epochs=max_epochs,
-        batch_size=batch_size,
-    )
+#     key, train_key = jax.random.split(key)
+#     train_flow, losses = fit_to_data(
+#         key=train_key,
+#         dist=dynamics,
+#         data=(next_states, context),
+#         learning_rate=learning_rate,
+#         max_patience=max_patience,
+#         max_epochs=max_epochs,
+#         batch_size=batch_size,
+#     )
 
-    return train_flow, losses
-
-
-def train_reward(
-    states: jax.Array,
-    actions: jax.Array,
-    rewards: jax.Array,
-    key: jtp.Key[jtp.Array, ""],
-) -> typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]]:
-    """Train a Spectral Mixture Gaussian Process on the Rewards and return a Callable."""
-
-    context = jnp.concatenate([states, actions], axis=-1)
-
-    # --- Configuration ---
-    batch_size = 512
-    num_epochs = 200
-    num_iters = (states.shape[0] // batch_size) * num_epochs
-
-    # --- Build Sparse Infrastructure ---
-    # Using 150 sparse inducing coordinates instead of all 10k inputs
-    key, subkey = jax.random.split(key)
-    svgp_posterior, dataset = build_sparse_sm_model(
-        subkey,
-        context,
-        rewards,
-        num_mixtures=4,
-        num_inducing=150,
-    )
-
-    print(f"Beginning SVGP Mini-batched Optimization for {num_iters} iterations...")
-
-    # Native GPJax stochastic fitting engine handle
-    key, subkey = jax.random.split(key)
-    opt_svgp, _ = gpx.fit(
-        model=svgp_posterior,
-        # we want want to minimize the *negative* ELBO
-        objective=lambda p, d: -gpx.objectives.collapsed_elbo(p, d),
-        train_data=dataset,
-        optim=optax.adamw(learning_rate=1e-2),
-        num_iters=num_iters,
-        key=subkey,
-    )
-    gp_predictor: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]] = (
-        make_sparse_predictive_function(opt_svgp, train_data=dataset)
-    )
-    return gp_predictor
+#     return train_flow, losses
 
 
-def rollout(
-    actor: FlowActor,
-    dynamics: FlowDynamics,
-    key: jax.Array,
-    prev_s0: jax.Array,
-    curr_s0: jax.Array,
-    reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
-    *,
-    horizon: int = 50,
-    discount: float = 0.99,
-) -> jax.Array:
+# def train_reward(
+#     states: jax.Array,
+#     actions: jax.Array,
+#     rewards: jax.Array,
+#     key: jtp.Key[jtp.Array, ""],
+# ) -> typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]]:
+#     """Train a Spectral Mixture Gaussian Process on the Rewards and return a Callable."""
 
-    def step(
-        carry: tuple[jax.Array, jax.Array, jax.Array],
-        _: None,
-    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
-        prev_s, curr_s, k = carry
-        k, ak, sk = jax.random.split(k, 3)
+#     context = jnp.concatenate([states, actions], axis=-1)
 
-        action = actor.sample_action(ak, prev_s, curr_s)  # already in [low, high]
-        r = reward_fn(jnp.atleast_2d(jnp.concatenate([curr_s, action], axis=-1)))
-        next_s = dynamics.predict_next_state(sk, curr_s, action)
+#     # --- Configuration ---
+#     batch_size = 512
+#     num_epochs = 200
+#     num_iters = (states.shape[0] // batch_size) * num_epochs
 
-        return (curr_s, next_s, k), r
+#     # --- Build Sparse Infrastructure ---
+#     # Using 150 sparse inducing coordinates instead of all 10k inputs
+#     key, subkey = jax.random.split(key)
+#     svgp_posterior, dataset = build_sparse_sm_model(
+#         subkey,
+#         context,
+#         rewards,
+#         num_mixtures=4,
+#         num_inducing=150,
+#     )
 
-    (_, _, _), rewards = jax.lax.scan(step, (prev_s0, curr_s0, key), None, length=horizon)
-    discounts = discount ** jnp.arange(horizon)
-    return jnp.sum(discounts * rewards)
+#     print(f"Beginning SVGP Mini-batched Optimization for {num_iters} iterations...")
+
+#     # Native GPJax stochastic fitting engine handle
+#     key, subkey = jax.random.split(key)
+#     opt_svgp, _ = gpx.fit(
+#         model=svgp_posterior,
+#         # we want want to minimize the *negative* ELBO
+#         objective=lambda p, d: -gpx.objectives.collapsed_elbo(p, d),
+#         train_data=dataset,
+#         optim=optax.adamw(learning_rate=1e-2),
+#         num_iters=num_iters,
+#         key=subkey,
+#     )
+#     gp_predictor: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]] = (
+#         make_sparse_predictive_function(opt_svgp, train_data=dataset)
+#     )
+#     return gp_predictor
 
 
-def batched_return(
-    actor: FlowActor,
-    dynamics: FlowDynamics,
-    key: jax.Array,
-    prev_s0_batch: jax.Array,
-    curr_s0_batch: jax.Array,
-    reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
-) -> jax.Array:
-    keys = jax.random.split(key, prev_s0_batch.shape[0])
-    returns = jax.vmap(lambda k, ps0, cs0: rollout(actor, dynamics, k, ps0, cs0, reward_fn))(
-        keys, prev_s0_batch, curr_s0_batch
-    )
-    return jnp.mean(returns)
+# def rollout(
+#     actor: FlowActor,
+#     dynamics: FlowDynamics,
+#     key: jax.Array,
+#     prev_s0: jax.Array,
+#     curr_s0: jax.Array,
+#     reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
+#     *,
+#     horizon: int = 50,
+#     discount: float = 0.99,
+# ) -> jax.Array:
+
+#     def step(
+#         carry: tuple[jax.Array, jax.Array, jax.Array],
+#         _: None,
+#     ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+#         prev_s, curr_s, k = carry
+#         k, ak, sk = jax.random.split(k, 3)
+
+#         action = actor.sample_action(ak, prev_s, curr_s)  # already in [low, high]
+#         r = reward_fn(jnp.atleast_2d(jnp.concatenate([curr_s, action], axis=-1)))
+#         next_s = dynamics.predict_next_state(sk, curr_s, action)
+
+#         return (curr_s, next_s, k), r
+
+#     (_, _, _), rewards = jax.lax.scan(step, (prev_s0, curr_s0, key), None, length=horizon)
+#     discounts = discount ** jnp.arange(horizon)
+#     return jnp.sum(discounts * rewards)
+
+
+# def batched_return(
+#     actor: FlowActor,
+#     dynamics: FlowDynamics,
+#     key: jax.Array,
+#     prev_s0_batch: jax.Array,
+#     curr_s0_batch: jax.Array,
+#     reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
+# ) -> jax.Array:
+#     keys = jax.random.split(key, prev_s0_batch.shape[0])
+#     returns = jax.vmap(lambda k, ps0, cs0: rollout(actor, dynamics, k, ps0, cs0, reward_fn))(
+#         keys, prev_s0_batch, curr_s0_batch
+#     )
+#     return jnp.mean(returns)
+
+
+# @eqx.filter_jit
+# def loss_fn(
+#     params: FlowActor,
+#     static: FlowActor,
+#     dynamics: FlowDynamics,
+#     key: jax.Array,
+#     prev_s0_batch: jax.Array,
+#     curr_s0_batch: jax.Array,
+#     reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
+# ) -> jax.Array:
+#     actor_ = eqx.combine(params, static)
+#     return -batched_return(actor_, dynamics, key, prev_s0_batch, curr_s0_batch, reward_fn)
+
+
+# def train_actor(
+#     actor: FlowActor,
+#     dynamics: FlowDynamics,
+#     states: jax.Array,
+#     key: jax.Array,
+#     optimizer: optax.GradientTransformation,
+#     reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
+#     num_train_steps: int = 500,
+#     num_init_states: int = 64,
+# ) -> FlowActor:
+#     """Optimizes `actor` against the (frozen) `dynamics` model via
+#     differentiable rollouts, using (prev_state, curr_state) pairs drawn
+#     from `states` as initial conditions."""
+#     params, static = eqx.partition(actor, eqx.is_inexact_array)
+#     opt_state = optimizer.init(params)
+
+#     prev_states_pool = states[:-2]
+#     curr_states_pool = states[1:-1]
+
+#     @eqx.filter_jit
+#     def train_step(
+#         params: FlowActor,
+#         static: FlowActor,
+#         opt_state: optax.OptState,
+#         dynamics: FlowDynamics,
+#         key: jax.Array,
+#         prev_s0_batch: jax.Array,
+#         curr_s0_batch: jax.Array,
+#     ) -> tuple[FlowActor, optax.OptState, jax.Array]:
+#         loss, grads = eqx.filter_value_and_grad(loss_fn)(
+#             params, static, dynamics, key, prev_s0_batch, curr_s0_batch, reward_fn
+#         )
+#         updates, opt_state = optimizer.update(grads, opt_state, params)
+#         params = eqx.apply_updates(params, updates)
+#         return params, opt_state, loss
+
+#     for step in range(num_train_steps):
+#         key, batch_key, step_key = jax.random.split(key, 3)
+#         idx = jax.random.randint(batch_key, (num_init_states,), 0, prev_states_pool.shape[0])
+#         prev_s0_batch = prev_states_pool[idx]
+#         curr_s0_batch = curr_states_pool[idx]
+
+#         params, opt_state, loss = train_step(
+#             params, static, opt_state, dynamics, step_key, prev_s0_batch, curr_s0_batch
+#         )
+
+#         if step % 20 == 0:
+#             print(f"  [actor] step {step}, loss {loss:.4f}")
+
+#     return eqx.combine(params, static)
 
 
 @eqx.filter_jit
-def loss_fn(
-    params: FlowActor,
-    static: FlowActor,
-    dynamics: FlowDynamics,
-    key: jax.Array,
-    prev_s0_batch: jax.Array,
-    curr_s0_batch: jax.Array,
-    reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
-) -> jax.Array:
-    actor_ = eqx.combine(params, static)
-    return -batched_return(actor_, dynamics, key, prev_s0_batch, curr_s0_batch, reward_fn)
+def train_step(
+    world_model: FlowDynamics, 
+    opt_state: optax.OptState, 
+    opt_update_fn: optax.TransformUpdateFn,
+    batch_states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"], 
+    batch_actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"]
+) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
+    """Performs a single functional gradient step update."""
+    loss_value, grads = compute_batch_loss(world_model, batch_states, batch_actions)
 
+    # Apply updates via optax
+    updates, opt_state = opt_update_fn(grads, opt_state, world_model)
+    world_model = eqx.apply_updates(world_model, updates)
 
-def train_actor(
-    actor: FlowActor,
-    dynamics: FlowDynamics,
-    states: jax.Array,
-    key: jax.Array,
-    optimizer: optax.GradientTransformation,
-    reward_fn: typing.Callable[[jtp.Float[jtp.Array, "N_test D"]], jtp.Float[jtp.Array, " N_test"]],
-    num_train_steps: int = 500,
-    num_init_states: int = 64,
-) -> FlowActor:
-    """Optimizes `actor` against the (frozen) `dynamics` model via
-    differentiable rollouts, using (prev_state, curr_state) pairs drawn
-    from `states` as initial conditions."""
-    params, static = eqx.partition(actor, eqx.is_inexact_array)
-    opt_state = optimizer.init(params)
+    return world_model, opt_state, loss_value
 
-    prev_states_pool = states[:-2]
-    curr_states_pool = states[1:-1]
+def training_loop(
+    world_model: FlowDynamics,
+    dataset_states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
+    dataset_actions: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
+    batch_size: int = 32,
+    epochs: int = 10,
+    learning_rate: float = 3e-4,
+    seed: int = 42,
+) -> tuple[FlowDynamics, jax.Array]:
+    """Standard training loop for the FlowRSSM world model."""
+    key = jax.random.key(seed)
 
-    @eqx.filter_jit
-    def train_step(
-        params: FlowActor,
-        static: FlowActor,
-        opt_state: optax.OptState,
-        dynamics: FlowDynamics,
-        key: jax.Array,
-        prev_s0_batch: jax.Array,
-        curr_s0_batch: jax.Array,
-    ) -> tuple[FlowActor, optax.OptState, jax.Array]:
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(
-            params, static, dynamics, key, prev_s0_batch, curr_s0_batch, reward_fn
-        )
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
+    # Setup Optax optimizer
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate)
+    )
 
-    for step in range(num_train_steps):
-        key, batch_key, step_key = jax.random.split(key, 3)
-        idx = jax.random.randint(batch_key, (num_init_states,), 0, prev_states_pool.shape[0])
-        prev_s0_batch = prev_states_pool[idx]
-        curr_s0_batch = curr_states_pool[idx]
+    # Filter out static parts of the Equinox module so optax only allocates for arrays
+    trainable_params = eqx.filter(world_model, eqx.is_array)
+    opt_state = optimizer.init(trainable_params)
 
-        params, opt_state, loss = train_step(
-            params, static, opt_state, dynamics, step_key, prev_s0_batch, curr_s0_batch
-        )
+    num_samples = dataset_states.shape[0]
+    steps_per_epoch = num_samples // batch_size
+    losses = []
 
-        if step % 20 == 0:
-            print(f"  [actor] step {step}, loss {loss:.4f}")
+    print(f"Starting training for {epochs} epochs...")
 
-    return eqx.combine(params, static)
+    for epoch in range(epochs):
+        key, subkey = jax.random.split(key)
+        # Shuffle dataset indices each epoch
+        shuffled_idx = jax.random.permutation(subkey, num_samples)
+
+        epoch_losses = []
+        for step in range(steps_per_epoch):
+            # Batch slicing
+            batch_idx = shuffled_idx[step * batch_size : (step + 1) * batch_size]
+            b_states = dataset_states[batch_idx]
+            b_actions = dataset_actions[batch_idx]
+
+            # Step update
+            world_model, opt_state, loss_val = train_step(
+                world_model, opt_state, optimizer.update, b_states, b_actions
+            )
+            epoch_losses.append(loss_val)
+
+        print(f"Epoch {epoch+1:02d} | Avg NLL Loss: {jnp.mean(jnp.array(epoch_losses)):.4f}")
+        losses.extend(epoch_losses)
+
+    return world_model, jnp.array(losses)

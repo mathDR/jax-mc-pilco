@@ -46,7 +46,7 @@ def functional_rollout(
 
         # Action model decides the action based on state and hidden context
         policy_input = jnp.concatenate([current_state, current_hidden], axis=-1)
-        action, _ = action_model.sample_action_and_log_prob(action_key, policy_input)
+        action = action_model.sample_action(action_key, policy_input)
 
         # World model predicts the next state using its internal logic
         next_state, next_hidden = world_model.predict_next_state(
