@@ -148,11 +148,7 @@ def collect_experience(
 
             for _ in range(num_steps):
                 key, ak = jax.random.split(key)
-                action = (
-                    env.action_space.sample()
-                    if actor is None
-                    else actor.sample_action(ak, jnp.array(curr_state))
-                )
+                action = env.action_space.sample() if actor is None else actor.sample_action(ak, jnp.array(curr_state))
                 action_np = np.array(action)
 
                 next_state, reward, terminated, truncated, _ = env.step(action_np)
@@ -184,4 +180,3 @@ def collect_experience(
         jnp.array(next_states),
         jnp.array(rewards)[:, jnp.newaxis],
     )
-

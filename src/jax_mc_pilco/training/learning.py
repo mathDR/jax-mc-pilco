@@ -39,19 +39,16 @@ def world_training_loop(
         )
 
     # Setup Optax optimizer
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate)
-    )
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate))
 
     opt_state = optimizer.init(eqx.filter(world_model, eqx.is_inexact_array))
 
     @eqx.filter_jit
     def world_train_step(
-        world_model: FlowDynamics, 
+        world_model: FlowDynamics,
         _opt_state: jtp.PyTree,
-        _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"], 
-        _actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"]
+        _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
+        _actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"],
     ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
         """Performs a single functional gradient step update."""
         loss_value, grads = eqx.filter_value_and_grad(single_trajectory_loss)(world_model, _states, _actions)
@@ -79,12 +76,10 @@ def world_training_loop(
             b_actions = dataset_actions[batch_idx]
 
             # Step update
-            world_model, opt_state, loss_val = world_train_step(
-                world_model, opt_state, b_states, b_actions
-            )
+            world_model, opt_state, loss_val = world_train_step(world_model, opt_state, b_states, b_actions)
             epoch_losses.append(loss_val)
 
-        print(f"Epoch {epoch+1:02d} | Avg NLL Loss: {jnp.mean(jnp.array(epoch_losses)):.4f}")
+        print(f"Epoch {epoch + 1:02d} | Avg NLL Loss: {jnp.mean(jnp.array(epoch_losses)):.4f}")
         losses.extend(epoch_losses)
 
     return world_model, jnp.array(losses)

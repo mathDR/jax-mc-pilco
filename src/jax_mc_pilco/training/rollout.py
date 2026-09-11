@@ -1,4 +1,5 @@
 """Multi-step imagination rollout."""
+
 import jax
 import jaxtyping as jtp
 from typeguard import typechecked as typechecker
@@ -36,10 +37,11 @@ def functional_rollout(
     # Define the single-step pure transition function for jax.lax.scan
     def scan_fn(
         carry: tuple[jtp.Float[jtp.Array, " state_dim"], jtp.Float[jtp.Array, " hidden_dim"]],
-        step_key: jtp.Key[jtp.Array, ""], action_key: jtp.Key[jtp.Array, ""],
+        step_key: jtp.Key[jtp.Array, ""],
+        action_key: jtp.Key[jtp.Array, ""],
     ) -> tuple[
-        tuple[jtp.Float[jtp.Array, " state_dim"], jtp.Float[jtp.Array, " hidden_dim"]], 
-        tuple[jtp.Float[jtp.Array, " state_dim"], jtp.Float[jtp.Array, " action_dim"]]
+        tuple[jtp.Float[jtp.Array, " state_dim"], jtp.Float[jtp.Array, " hidden_dim"]],
+        tuple[jtp.Float[jtp.Array, " state_dim"], jtp.Float[jtp.Array, " action_dim"]],
     ]:
         current_state, current_hidden = carry
 
@@ -60,8 +62,6 @@ def functional_rollout(
     init_carry = (init_state, init_hidden)
 
     # 4. Run the fast scanned loop across the horizon steps
-    _, (imagined_states, imagined_actions) = jax.lax.scan(
-        scan_fn, init_carry, keys, length=horizon
-    )
+    _, (imagined_states, imagined_actions) = jax.lax.scan(scan_fn, init_carry, keys, length=horizon)
 
     return imagined_states, imagined_actions

@@ -49,7 +49,9 @@ class FlowActor(eqx.Module):
 
         loc = action_low - EPSILON
         self.margin = 2 * EPSILON * (self.action_high - self.action_low)
-        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,), cond_shape=None), Affine(loc=loc, scale=self.margin)]))
+        squash = non_trainable(
+            Chain([Sigmoid(shape=(action_dim,), cond_shape=None), Affine(loc=loc, scale=self.margin)])
+        )
         full_bijection = Chain([base_flow.bijection, squash])
         self.flow = Transformed(base_dist, full_bijection)
 
