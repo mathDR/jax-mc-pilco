@@ -61,7 +61,7 @@ class FlowDynamics(eqx.Module):
         else:
             self.flow = base_flow
 
-        # TODO: utilize a chained sigmoid and affine to constrain the flow 
+        # TODO: utilize a chained sigmoid and affine to constrain the flow
         # (somehow) so deltas are within bounds.
 
     def predict_next_state_and_hidden(
@@ -77,7 +77,6 @@ class FlowDynamics(eqx.Module):
         next_hidden = self.memory(context, prev_hidden)
         delta_s = self.flow.sample(key, condition=next_hidden)
         return jnp.clip(prev_state + delta_s, self.state_low, self.state_high), next_hidden
-
 
     def log_prob(
         self,

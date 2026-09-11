@@ -35,6 +35,7 @@ dependencies = [
     "optax>=0.1.9",
     "pygame>=2.6.1",
     "scipy>=1.13.1",
+    "typeguard>=4.5.2",
 ]
 
 [project.urls]

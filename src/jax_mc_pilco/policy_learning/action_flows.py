@@ -10,6 +10,7 @@ from paramax import non_trainable
 
 EPSILON = 1e-4
 
+
 class FlowActor(eqx.Module):
     """
     Conditional Normalizing Flow policy.
@@ -17,8 +18,6 @@ class FlowActor(eqx.Module):
     """
 
     flow: Transformed
-    state_dim: int
-    action_dim: int
     action_low: jax.Array
     action_high: jax.Array
     margin: jax.Array
@@ -26,18 +25,15 @@ class FlowActor(eqx.Module):
     def __init__(
         self,
         key: jtp.Key[jtp.Array, ""],
-        state_dim: int,
+        context_dim: int,
         action_dim: int,
         action_low: jax.Array,
         action_high: jax.Array,
         flow_layers: int = 4,
     ):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
         self.action_low = jnp.broadcast_to(action_low, (action_dim,))
         self.action_high = jnp.broadcast_to(action_high, (action_dim,))
 
-        cond_dim = state_dim * 2
         base_dist = MultivariateNormal(
             loc=jnp.zeros(action_dim),
             covariance=jnp.eye(action_dim),
@@ -45,14 +41,14 @@ class FlowActor(eqx.Module):
         base_flow = coupling_flow(
             key=key,
             base_dist=base_dist,
-            cond_dim=cond_dim,
+            cond_dim=context_dim,
             nn_width=256,
             nn_depth=2,
             flow_layers=flow_layers,
         )
 
         loc = action_low - EPSILON
-        self.margin = 2*EPSILON * (self.action_high - self.action_low)
+        self.margin = 2 * EPSILON * (self.action_high - self.action_low)
         squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=self.margin)]))
         full_bijection = Chain([base_flow.bijection, squash])
         self.flow = Transformed(base_dist, full_bijection)
@@ -63,20 +59,16 @@ class FlowActor(eqx.Module):
     def sample_action(
         self,
         key: jtp.Key[jtp.Array, ""],
-        prev_state: jax.Array,
-        curr_state: jax.Array,
+        context: jax.Array,
     ) -> jax.Array:
-        context = jnp.concatenate([prev_state, curr_state], axis=-1)
         action = self.flow.sample(key, condition=context)
         return self._debounce(action)
 
     def sample_action_and_log_prob(
         self,
         key: jtp.Key[jtp.Array, ""],
-        prev_state: jax.Array,
-        curr_state: jax.Array,
+        context: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        context = jnp.concatenate([prev_state, curr_state], axis=-1)
         action, _ = self.flow.sample_and_log_prob(key, condition=context)
         action = self._debounce(action)
         logp = self.flow.log_prob(action, condition=context)
@@ -85,9 +77,7 @@ class FlowActor(eqx.Module):
     def log_prob(
         self,
         action: jax.Array,
-        prev_state: jax.Array,
-        curr_state: jax.Array,
+        context: jax.Array,
     ) -> jax.Array:
-        context = jnp.concatenate([prev_state, curr_state], axis=-1)
         action = self._debounce(action)
         return self.flow.log_prob(action, condition=context)
