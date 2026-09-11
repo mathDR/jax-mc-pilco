@@ -1,6 +1,5 @@
 """Multi-step imagination rollout."""
 import jax
-import jax.numpy as jnp
 import jaxtyping as jtp
 from typeguard import typechecked as typechecker
 
@@ -45,11 +44,10 @@ def functional_rollout(
         current_state, current_hidden = carry
 
         # Action model decides the action based on state and hidden context
-        policy_input = jnp.concatenate([current_state, current_hidden], axis=-1)
-        action = action_model.sample_action(action_key, policy_input)
+        action = action_model.sample_action(action_key, current_state)
 
         # World model predicts the next state using its internal logic
-        next_state, next_hidden = world_model.predict_next_state(
+        next_state, next_hidden = world_model.predict_next_state_and_hidden(
             current_state, action, current_hidden, step_key
         )
 

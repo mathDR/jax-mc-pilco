@@ -43,17 +43,15 @@ class FlowDynamics(eqx.Module):
                 loc=jnp.zeros(state_dim, dtype=float),
                 covariance=jnp.eye(state_dim, dtype=float),
             )
-
-            self.flow = coupling_flow(
+            base_flow = coupling_flow(
                 key=key,
                 base_dist=base_dist,
-                cond_dim=cond_dim,
+                cond_dim=deter_dim,
                 nn_width=256,
                 nn_depth=2,
                 flow_layers=flow_layers,
             )
-        else:
-            self.flow = base_flow
+        self.flow = base_flow
 
         # TODO: utilize a chained sigmoid and affine to constrain the flow
         # (somehow) so deltas are within bounds.
