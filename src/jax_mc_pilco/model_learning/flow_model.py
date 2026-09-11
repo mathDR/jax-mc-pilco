@@ -9,14 +9,16 @@ from flowjax.flows import coupling_flow
 
 class FlowDynamics(eqx.Module):
     """
-    Conditional Normalizing Flow dynamics model.
-    Maps noise z ~ N(0, I) -> Delta State given the context [s_t, a_t]
+    Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
 
     flow: Transformed
+    memory: eqx.nn.GRUCell
     base_flow: Transformed
     state_dim: int
     action_dim: int
+    state_high: jax.Array
+    state_low: jax.Array
 
     def __init__(
         self,
@@ -25,6 +27,7 @@ class FlowDynamics(eqx.Module):
         action_dim: int,
         state_low: jax.Array,
         state_high: jax.Array,
+        deter_dim: int = 64,
         flow_layers: int = 4,
         *,
         base_flow: Transformed | None = None,
@@ -35,6 +38,11 @@ class FlowDynamics(eqx.Module):
         # Context consists of current state and taken action
         cond_dim = state_dim + action_dim
 
+        self.state_low = jnp.broadcast_to(state_low, (state_dim,))
+        self.state_high = jnp.broadcast_to(state_high, (state_dim,))
+
+        self.memory = eqx.nn.GRUCell(input_size=cond_dim, hidden_size=deter_dim, key=key)
+
         if base_flow is None:
             # Define a base distribution matching the state delta dimension
             base_dist = MultivariateNormal(
@@ -42,7 +50,7 @@ class FlowDynamics(eqx.Module):
                 covariance=jnp.eye(state_dim, dtype=float),
             )
 
-            self.base_flow = coupling_flow(
+            self.flow = coupling_flow(
                 key=key,
                 base_dist=base_dist,
                 cond_dim=cond_dim,
@@ -51,25 +59,25 @@ class FlowDynamics(eqx.Module):
                 flow_layers=flow_layers,
             )
         else:
-            self.base_flow = base_flow
-        # Sigmoid: R -> (0, 1); then affine: (0, 1) -> (low, high)
-        # loc = state_low - 1e-7
-        # scale = state_high - state_low
-        # squash = Chain([Sigmoid(shape=(state_dim,)), Affine(loc=loc, scale=scale)])
+            self.flow = base_flow
 
-        # self.flow = Transformed(self.base_flow, squash)
-        self.flow = self.base_flow
+        # TODO: utilize a chained sigmoid and affine to constrain the flow 
+        # (somehow) so deltas are within bounds.
 
-    def predict_next_state(
+    def predict_next_state_and_hidden(
         self,
         key: jtp.Key[jtp.Array, ""],
-        s_curr: jax.Array,
-        action: jax.Array,
-    ) -> jax.Array:
+        prev_state: jax.Array,
+        prev_action: jax.Array,
+        prev_hidden: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
         """Samples a structural residual transition delta and adds it to s_t."""
-        context = jnp.concatenate([s_curr, action], axis=-1)
-        delta_s = self.flow.sample(key, condition=context)
-        return s_curr + delta_s
+        context = jnp.concatenate([prev_state, prev_action], axis=-1)
+        # Update hidden state
+        next_hidden = self.memory(context, prev_hidden)
+        delta_s = self.flow.sample(key, condition=next_hidden)
+        return jnp.clip(prev_state + delta_s, self.state_low, self.state_high), next_hidden
+
 
     def log_prob(
         self,

@@ -8,6 +8,7 @@ from flowjax.distributions import MultivariateNormal, Transformed
 from flowjax.flows import coupling_flow
 from paramax import non_trainable
 
+EPSILON = 1e-4
 
 class FlowActor(eqx.Module):
     """
@@ -20,6 +21,7 @@ class FlowActor(eqx.Module):
     action_dim: int
     action_low: jax.Array
     action_high: jax.Array
+    margin: jax.Array
 
     def __init__(
         self,
@@ -32,8 +34,9 @@ class FlowActor(eqx.Module):
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.action_low = action_low
-        self.action_high = action_high
+        self.action_low = jnp.broadcast_to(action_low, (action_dim,))
+        self.action_high = jnp.broadcast_to(action_high, (action_dim,))
+
         cond_dim = state_dim * 2
         base_dist = MultivariateNormal(
             loc=jnp.zeros(action_dim),
@@ -47,29 +50,15 @@ class FlowActor(eqx.Module):
             nn_depth=2,
             flow_layers=flow_layers,
         )
-        # Sigmoid: R -> (0, 1); then affine: (0, 1) -> (low, high).
-        # These bounds are fixed action-space limits, not learned parameters:
-        # wrap the squash bijection in paramax.non_trainable so flowjax's
-        # internal `unwrap()` (called at the top of every log_prob/sample/
-        # sample_and_log_prob) applies stop_gradient to its loc/scale before
-        # use. Without this, PPO's gradient updates silently drift the action
-        # bounds themselves - and once action_high shrinks below an
-        # already-sampled action, log_prob for that action diverges.
-        loc = action_low
-        scale = action_high - action_low
-        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=scale)]))
+
+        loc = action_low - EPSILON
+        self.margin = 2*EPSILON * (self.action_high - self.action_low)
+        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=self.margin)]))
         full_bijection = Chain([base_flow.bijection, squash])
         self.flow = Transformed(base_dist, full_bijection)
 
-    # A sample that lands on (or numerically rounds to) the exact action
-    # boundary makes the squash bijection's inverse compute log(0), a true
-    # NaN that survives naive clipping. Nudging samples a hair inside the
-    # bounds keeps log_prob's inverse-Sigmoid step well defined.
-    _EPS = 1e-4
-
     def _debounce(self, action: jax.Array) -> jax.Array:
-        margin = self._EPS * (self.action_high - self.action_low)
-        return jnp.clip(action, self.action_low + margin, self.action_high - margin)
+        return jnp.clip(action, self.action_low + self.margin, self.action_high - self.margin)
 
     def sample_action(
         self,
@@ -90,8 +79,6 @@ class FlowActor(eqx.Module):
         context = jnp.concatenate([prev_state, curr_state], axis=-1)
         action, _ = self.flow.sample_and_log_prob(key, condition=context)
         action = self._debounce(action)
-        # log_prob changes negligibly for an eps-sized nudge, but recompute
-        # exactly so the stored (action, log_prob) pair stays consistent.
         logp = self.flow.log_prob(action, condition=context)
         return action, logp
 
