@@ -1,5 +1,5 @@
 """Methods to train Flows and generate data."""
-from typing import Callable
+from collections.abc import Callable, Iterable
 
 import equinox as eqx
 import jax
@@ -31,7 +31,7 @@ def world_training_loop(
     epochs: int = 100,
     learning_rate: float = 3e-4,
     val_pct: float = 0.1,
-) -> tuple[FlowDynamics, jax.Array]:
+) -> tuple[FlowDynamics, jax.Array, jax.Array]:
     """Standard training loop for the world model."""
 
     # Should split states and actions into training and validation so we can stop
@@ -73,14 +73,14 @@ def world_training_loop(
         _opt_state: jtp.PyTree,
         _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
         _actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"],
-    ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
+    ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""], jax.Array]:
         """Performs a single functional gradient step update."""
 
-        loss_value, grads = eqx.filter_value_and_grad(single_trajectory_loss)(world_model, _states, _actions)
+        (loss_value, final_hidden), grads = eqx.filter_value_and_grad(single_trajectory_loss)(world_model, _states, _actions)
         updates, opt_state = optimizer.update(grads, _opt_state, eqx.filter(world_model, eqx.is_inexact_array))
 
         world_model = eqx.apply_updates(world_model, updates)
-        return world_model, opt_state, loss_value
+        return world_model, opt_state, loss_value, final_hidden
 
     losses = []
 
@@ -99,18 +99,18 @@ def world_training_loop(
             b_actions = dataset_actions[batch_idx]
 
             # Step update
-            world_model, opt_state, loss_val = world_train_step(world_model, opt_state, b_states, b_actions)
+            world_model, opt_state, loss_val, final_hidden = world_train_step(world_model, opt_state, b_states, b_actions)
             epoch_losses.append(loss_val)
 
         print(f"Epoch {epoch + 1:02d} | Avg NLL Loss: {jnp.mean(jnp.array(epoch_losses)):.4f}")
         losses.extend(epoch_losses)
 
-    return world_model, jnp.array(losses)
+    return world_model, final_hidden, jnp.array(losses)
 
 def fit_to_data(
     key: jtp.Key[jtp.Array, ""],
     model: jtp.PyTree,  # Custom losses may support broader types than AbstractDistribution
-    data: jtp.ArrayLike | jtp.Iterable[jtp.ArrayLike],
+    data: jtp.ArrayLike | Iterable[jtp.ArrayLike],
     loss_fn: Callable,
     *,
     learning_rate: float = 5e-4,

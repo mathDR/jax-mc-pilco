@@ -13,14 +13,13 @@ key = jax.random.key(seed=4)
 key, subkey = jax.random.split(key)
 _, max_episode_len, states, actions, next_states, rewards = collect_experience(env, 5_000, subkey, None)
 print(f"Environment data collection complete. Sampled {states.shape[0]} points.")
-breakpoint()
 # # ============================================================
 # # Train FlowDynamics (world model) -- frozen afterwards
 # # ============================================================
 key, subkey = jax.random.split(key)
-dynamics, losses = world_training_loop(subkey, states, actions)
+dynamics, final_hidden, losses = world_training_loop(subkey, states, actions)
 
-print("Dynamics model fit complete. Final loss:", losses["val"][-1])
+print("Dynamics model fit complete. Final loss:", losses[-1])
 breakpoint()
 # # ============================================================
 # # Train RewardGP (reward model) -- frozen afterwards

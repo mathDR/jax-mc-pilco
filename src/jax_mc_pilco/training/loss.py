@@ -11,12 +11,18 @@ def single_trajectory_loss(
     world_model: FlowDynamics,
     states: jtp.Float[jtp.Array, " seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " seq_len action_dim"],
-) -> jtp.Float[jtp.Array, ""]:
+) -> tuple[jtp.Float[jtp.Array, ""], jax.Array]:
     """Computes NLL loss for a single trajectory episode."""
 
     # Initialize hidden state to zeros for the start of the sequence
     hidden_dim = world_model.memory.hidden_size
     init_hidden = jnp.zeros((hidden_dim,))
+
+    # Important alignment: We have T steps of states/actions. 
+    # We can only compute T-1 deltas. 
+    # Therefore, we only run the scan on the first T-1 steps.
+    input_states = states[:-1]
+    input_actions = actions[:-1]
 
     def scan_fn(current_hidden: jax.Array, data: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
         prev_state, prev_action = data
@@ -29,10 +35,10 @@ def single_trajectory_loss(
         return next_hidden, next_hidden
 
     # Get the sequence of contexts (shape: [seq_len - 1, hidden_dim])
-    _, contexts = jax.lax.scan(scan_fn, init_hidden, (states, actions))
+    final_hidden, contexts = jax.lax.scan(scan_fn, init_hidden, (input_states, input_actions))
 
     delta_s_targets = jnp.diff(states, axis=0)
 
-    nll_losses = -world_model.log_prob(delta_s_targets, context=contexts[:-1])
+    nll_losses = -world_model.log_prob(delta_s_targets, context=contexts)
 
-    return jnp.mean(nll_losses)
+    return jnp.mean(nll_losses), final_hidden

@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
 import optax
@@ -16,6 +17,8 @@ def step(
     optimizer: optax.GradientTransformation,
     opt_state: jtp.PyTree,
     loss_fn: Callable[..., jtp.Scalar],
+    *,
+    key: jtp.Key[jtp.Array, ""],
 ) -> tuple[jtp.PyTree, jtp.PyTree, jtp.Array]:
     """Carry out a training step.
 
