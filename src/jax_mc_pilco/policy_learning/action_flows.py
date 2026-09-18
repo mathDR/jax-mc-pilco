@@ -25,7 +25,7 @@ class FlowActor(eqx.Module):
     def __init__(
         self,
         key: jtp.Key[jtp.Array, ""],
-        state_dim: int,
+        cond_dim: int,
         action_dim: int,
         action_low: jax.Array,
         action_high: jax.Array,
@@ -41,7 +41,7 @@ class FlowActor(eqx.Module):
         base_flow = coupling_flow(
             key=key,
             base_dist=base_dist,
-            cond_dim=state_dim,
+            cond_dim=cond_dim,
             nn_width=256,
             nn_depth=2,
             flow_layers=flow_layers,
@@ -49,37 +49,28 @@ class FlowActor(eqx.Module):
 
         loc = action_low - EPSILON
         self.margin = 2 * EPSILON * (self.action_high - self.action_low)
-        squash = non_trainable(
-            Chain([Sigmoid(shape=(action_dim,), cond_shape=None), Affine(loc=loc, scale=self.margin)])
-        )
+        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=self.margin)]))
         full_bijection = Chain([base_flow.bijection, squash])
         self.flow = Transformed(base_dist, full_bijection)
-
-    def _debounce(self, action: jax.Array) -> jax.Array:
-        return jnp.clip(action, self.action_low + self.margin, self.action_high - self.margin)
 
     def sample_action(
         self,
         key: jtp.Key[jtp.Array, ""],
-        state: jax.Array,
+        context: jax.Array,
     ) -> jax.Array:
-        action = self.flow.sample(key, condition=state)
-        return self._debounce(action)
+        return self.flow.sample(key, condition=context)
 
     def sample_action_and_log_prob(
         self,
         key: jtp.Key[jtp.Array, ""],
-        state: jax.Array,
+        context: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        action, _ = self.flow.sample_and_log_prob(key, condition=state)
-        action = self._debounce(action)
-        logp = self.flow.log_prob(action, condition=state)
+        action, logp = self.flow.sample_and_log_prob(key, condition=context)
         return action, logp
 
     def log_prob(
         self,
         action: jax.Array,
-        state: jax.Array,
+        context: jax.Array,
     ) -> jax.Array:
-        action = self._debounce(action)
-        return self.flow.log_prob(action, condition=state)
+        return self.flow.log_prob(action, condition=context)

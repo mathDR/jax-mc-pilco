@@ -49,7 +49,7 @@ def train_val_split(
     key: jtp.Key[jtp.Array, ""],
     arrays: Sequence[jtp.Shaped[jtp.Array, "batch ..."]],
     val_prop: float = 0.1,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[list[jax.Array], list[jax.Array]]:
     """Random train validation split for a sequence of arrays.
 
     Args:
@@ -60,15 +60,14 @@ def train_val_split(
     Returns:
         A tuple containing the train arrays and the validation arrays.
     """
-    if not 0 <= val_prop <= 1:
-        raise ValueError("val_prop should be between 0 and 1.")
+    assert 0 <= val_prop <= 1, f"val_prop should be between 0 and 1. You provided {val_prop}"
 
     num_samples = arrays[0].shape[0]
-    if not all(isinstance(a, Shaped[Array, " dim ..."]) for a in arrays):
+    if not all(isinstance(a, jtp.Shaped[jtp.Array, " dim ..."]) for a in arrays):
         raise ValueError("Array dimensions must match along axis 0.")
 
     n_train = num_samples - round(val_prop * num_samples)
-    arrays = [jr.permutation(key, a) for a in arrays]
+    arrays = [jax.random.permutation(key, a) for a in arrays]
     train_arrays = [arr[:n_train] for arr in arrays]
     val_arrays = [arr[n_train:] for arr in arrays]
     return train_arrays, val_arrays

@@ -64,27 +64,26 @@ def collect_mbrl_transitions(
     sobol_states = generate_sobol_initial_states(num_states, 9, lb, ub)
 
     # Storage arrays for MBRL training
-    observations = []
-    actions = []
-    next_observations = []
-    rewards = []
+    all_observations = []
+    all_actions = []
+    all_next_observations = []
+    all_rewards = []
 
     # Unwrap to access MuJoCo mechanics directly
     raw_env = env.unwrapped
 
     for state in sobol_states:
         # Extract MuJoCo physics coordinates
-        # qpos = [cart_x, theta1, theta2]
-        # qvel = [cart_x_dot, theta1_dot, theta2_dot]
         qpos, qvel = observation_to_qpos_qvel(state)
+        observations = []
+        actions = []
+        next_observations = []
+        rewards = []
+
+        env.reset()
+        raw_env.set_state(qpos, qvel)
 
         for _ in range(actions_per_state):
-            # A. HARD-RESET the simulator to the exact same Sobol state
-            env.reset()
-            raw_env.set_state(qpos, qvel)
-
-            # B. Get the correct state observation representation
-            # Gym's double pendulum observation is usually a vector of sines, cosines, and vels
             obs = raw_env._get_obs()
 
             # C. Sample a random exploratory action
@@ -98,12 +97,16 @@ def collect_mbrl_transitions(
             actions.append(action)
             next_observations.append(next_obs)
             rewards.append(reward)
+        all_observations.append(jnp.array(observations))
+        all_actions.append(jnp.array(actions))
+        all_next_observations.append(jnp.array(next_observations))
+        all_rewards.append(jnp.array(rewards))
 
     return (
-        jnp.array(observations),
-        jnp.array(actions),
-        jnp.array(next_observations),
-        jnp.array(rewards),
+        jnp.array(all_observations),
+        jnp.array(all_actions),
+        jnp.array(all_next_observations),
+        jnp.array(all_rewards),
     )
 
 
@@ -129,11 +132,11 @@ def collect_experience(
     total_reward = 0.0
 
     if use_sobol and exploration:
+        actions_per_state = 4
         states, actions, next_states, rewards = collect_mbrl_transitions(
             env,
-            # num_states=2 ** int(jnp.log2(num_steps // 4)),
-            num_states=2**10,
-            actions_per_state=4,
+            num_states=2 ** (1 + int(jnp.log2(num_steps // actions_per_state))),
+            actions_per_state=actions_per_state,
         )
         total_reward = 0.0
         max_episode_length = 0

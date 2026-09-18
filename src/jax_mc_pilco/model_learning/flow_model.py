@@ -77,3 +77,25 @@ class FlowDynamics(eqx.Module):
     ) -> jax.Array:
         """Calculates exact log-likelihood of the state delta given the context."""
         return self.flow.log_prob(delta_s, condition=context)
+
+    def predict_reward(self, state: jax.Array) -> jax.Array:
+        # Returns a scalar value for the given latent state representation
+        x = state[0]
+        y = jnp.arctan2(state[2], state[4])
+        v1 = state[5]
+        v2 = state[6]
+
+        dist_penalty = 0.01 * x**2 + (y - 2) ** 2
+        vel_penalty = 1e-3 * v1**2 + 5e-3 * v2**2
+        # Condition: y <= 1 -> invert it so True means "alive" (y > 1)
+        is_alive = y > 1.0
+
+        # jax.lax.cond(pred, true_fn, false_fn, *operands)
+        alive_bonus = jax.lax.cond(
+            is_alive,
+            lambda _: 10.0,  # If True (y > 1), return 10.0
+            lambda _: 0.0,  # If False (y <= 1), return 0.0
+            operand=None,
+        )
+
+        return alive_bonus - dist_penalty - vel_penalty
