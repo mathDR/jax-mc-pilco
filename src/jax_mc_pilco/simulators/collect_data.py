@@ -132,7 +132,7 @@ def collect_experience(
     total_reward = 0.0
 
     if use_sobol and exploration:
-        actions_per_state = 4
+        actions_per_state = 15
         states, actions, next_states, rewards = collect_mbrl_transitions(
             env,
             num_states=2 ** (1 + int(jnp.log2(num_steps // actions_per_state))),

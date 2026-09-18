@@ -97,5 +97,4 @@ class FlowDynamics(eqx.Module):
             lambda _: 0.0,  # If False (y <= 1), return 0.0
             operand=None,
         )
-
-        return alive_bonus - dist_penalty - vel_penalty
+        return jnp.array(alive_bonus - dist_penalty - vel_penalty)

@@ -36,6 +36,7 @@ dependencies = [
     "pygame>=2.6.1",
     "scipy>=1.13.1",
     "typeguard>=4.5.2",
+    "types-tqdm>=4.67.3.20260205",
 ]
 
 [project.urls]
@@ -143,7 +144,8 @@ module = [
     "jaxtyping.*",
     "equinox.*",
     "gpjax.*",
-    "jax.*"
+    "jax.*",
+    "optax.*",
 ]
 ignore_missing_imports = true
 # This stops mypy from tracking unimported Any's leaking out from these specific libraries
