@@ -146,6 +146,7 @@ module = [
     "gpjax.*",
     "jax.*",
     "optax.*",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 # This stops mypy from tracking unimported Any's leaking out from these specific libraries
