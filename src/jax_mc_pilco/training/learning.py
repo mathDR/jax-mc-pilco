@@ -23,6 +23,7 @@ def world_training_loop(
     key: jtp.Key[jtp.Array, ""],
     states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
+    next_states: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
     world_model: FlowDynamics | None = None,
     optimizer: optax.GradientTransformation | None = None,
     batch_size: int = 512,
@@ -57,7 +58,7 @@ def world_training_loop(
     best_params = params
     opt_state = optimizer.init(params)
 
-    data = (states, actions)
+    data = (states, actions, next_states)
 
     @eqx.filter_jit
     def world_train_step(
@@ -66,6 +67,7 @@ def world_training_loop(
         _opt_state: jtp.PyTree,
         _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
         _actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"],
+        _next_states: jtp.Float[jtp.Array, "batch_size seq_len action_dim"],
     ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
         """Performs a single functional gradient step update."""
 
@@ -74,6 +76,7 @@ def world_training_loop(
             static,
             _states,
             _actions,
+            _next_states,
         )
         updates, opt_state = optimizer.update(grads, _opt_state, params=params)
         params = eqx.apply_updates(params, updates)
