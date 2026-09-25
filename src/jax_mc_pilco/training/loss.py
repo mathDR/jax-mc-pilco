@@ -67,8 +67,9 @@ def imagine_trajectory_with_true_actions(
         )
 
         return (next_state, next_fast_weights, key), next_state
+
     _, pred_next_states = jax.lax.scan(step, (init_state, init_fast_weights, key), actions)
-    return jnp.mean(jnp.linalg.norm(pred_next_states-true_next_states))
+    return jnp.mean(jnp.linalg.norm(pred_next_states - true_next_states))
 
 
 def batched_rollout_loss(
@@ -81,7 +82,7 @@ def batched_rollout_loss(
 ) -> jax.Array:
     world_model = eqx.combine(world_model_params, world_model_static)
     keys = jax.random.split(key, next_states.shape[0])
-    losses = jax.vmap(imagine_trajectory_with_true_actions, in_axes=(None,0,0,0,0))(
+    losses = jax.vmap(imagine_trajectory_with_true_actions, in_axes=(None, 0, 0, 0, 0))(
         world_model,
         keys,
         init_states,

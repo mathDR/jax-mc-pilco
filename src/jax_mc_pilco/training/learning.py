@@ -24,7 +24,7 @@ def world_training_loop(
     states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
     next_states: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
-    world_model: FlowDynamics | None = None,
+    world_model: FlowDynamics,
     optimizer: optax.GradientTransformation | None = None,
     batch_size: int = 512,
     max_epochs: int = 1000,
@@ -37,15 +37,6 @@ def world_training_loop(
     """Standard training loop for the world model."""
 
     key, subkey = jax.random.split(key)
-
-    if world_model is None:
-        world_model = FlowDynamics(
-            key=subkey,
-            state_dim=states.shape[-1],
-            action_dim=actions.shape[-1],
-            state_low=states.min(axis=tuple(range(states.ndim - 1))),
-            state_high=states.max(axis=tuple(range(states.ndim - 1))),
-        )
 
     # Setup Optax optimizer
     if optimizer is None:
