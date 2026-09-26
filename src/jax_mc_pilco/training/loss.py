@@ -20,7 +20,7 @@ def single_trajectory_loss(
     # Get the sequence of contexts (shape: [seq_len - 1, hidden_dim])
     contexts, _ = world_model.memory.scan_sequence(states, actions)
 
-    delta_s_targets = next_states - states
+    delta_s_targets = eqx.filter_vmap(world_model.encoder)(next_states) - eqx.filter_vmap(world_model.encoder)(states)
 
     nll_losses = -world_model.log_prob(delta_s_targets, context=contexts)
 

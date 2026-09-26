@@ -9,6 +9,125 @@ from flowjax.distributions import AbstractDistribution, Transformed
 from flowjax.flows import coupling_flow
 
 
+class AgnosticObservationEncoder(eqx.Module):
+    encoder: eqx.nn.Sequential
+    input_dim: int = eqx.field(static=True)
+    num_frequencies: int = eqx.field(static=True)
+    encoded_dim: int = eqx.field(static=True)
+
+    def __init__(
+        self,
+        input_dim: int,
+        embedding_dim: int,
+        num_frequencies: int = 4,
+        *,
+        key: jtp.Key[jtp.Array, ""],
+    ) -> None:
+        self.input_dim = input_dim
+        self.num_frequencies = num_frequencies
+
+        # Create geometric/log-spaced frequencies (1, 2, 4, 8...)
+
+        # Calculate final size: raw value + sin features + cos features
+        self.encoded_dim = input_dim * (1 + 2 * num_frequencies)
+
+        # Standard Equinox linear layers
+        key1, key2 = jax.random.split(key, 2)
+        self.encoder = eqx.nn.Sequential([
+            eqx.nn.Linear(self.encoded_dim, embedding_dim, key=key1),
+            eqx.nn.Lambda(jax.nn.mish),
+            eqx.nn.Linear(embedding_dim, embedding_dim, key=key2),
+            eqx.nn.Lambda(jax.nn.mish),
+        ])
+
+    @property
+    def frequencies(self) -> jtp.Array:
+        return jnp.pow(2.0, jnp.arange(self.num_frequencies, dtype=jnp.float32))
+
+    def __call__(self, x: jtp.Array) -> jtp.Array:
+        """
+        Processes a single observation vector `x` of shape (input_dim,).
+        To process batches, use jax.vmap(encoder).
+        """
+        # x_expanded shape: (input_dim, 1)
+        x_expanded = jnp.expand_dims(x, axis=-1)
+
+        # Outer product via broadcasting to compute multi-frequency angles
+        # scaled shape: (input_dim, num_frequencies)
+        scaled = x_expanded * self.frequencies
+
+        # Flatten the sin and cos projections into 1D arrays
+        sin_feats = jnp.ravel(jnp.sin(scaled))
+        cos_feats = jnp.ravel(jnp.cos(scaled))
+
+        # Combine the original values with the periodic representations
+        features = jnp.concatenate([x, sin_feats, cos_feats], axis=-1)
+
+        return self.encoder(features)
+
+class AgnosticObservationDecoder(eqx.Module):
+    decoder_backbone: eqx.nn.Sequential
+    linear_head: eqx.nn.Linear
+    angle_sin_head: eqx.nn.Linear
+    angle_cos_head: eqx.nn.Linear
+    gate_head: eqx.nn.Linear
+    input_dim: int = eqx.field(static=True)
+
+    def __init__(
+        self,
+        input_dim: int,
+        embedding_dim: int = 128,
+        *,
+        key: jtp.Key[jtp.Array, ""],
+    ) -> None:
+        self.input_dim = input_dim
+
+        # Split keys for all independent heads
+        keys = jax.random.split(key, 5)
+
+        # Shared feature processing
+        self.decoder_backbone = eqx.nn.Sequential([
+            eqx.nn.Linear(embedding_dim, embedding_dim, key=keys[0]),
+            eqx.nn.Lambda(jax.nn.mish),
+            eqx.nn.Linear(embedding_dim, embedding_dim, key=keys[1]),
+            eqx.nn.Lambda(jax.nn.mish),
+        ])
+
+        # Head 1: Predicts direct linear values (positions, velocities)
+        self.linear_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[2])
+
+        # Head 2 & 3: Predicts sin/cos pairs to robustly reconstruct angles
+        self.angle_sin_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[3])
+        self.angle_cos_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[4])
+
+        # Head 4: Learns a per-element gate (0 = linear, 1 = angular)
+        self.gate_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[5])
+
+    def __call__(self, embedding: jtp.Array) -> jtp.Array:
+        """
+        Decodes a single embedding vector of shape (embedding_dim,) 
+        back to the original state space of shape (input_dim,).
+        """
+        # Extract deep features
+        latent = self.decoder_backbone(embedding)
+
+        # Compute the linear hypothesis
+        linear_pred = self.linear_head(latent)
+
+        # Compute the angular hypothesis using arctan2(sin, cos)
+        sin_pred = self.angle_sin_head(latent)
+        cos_pred = self.angle_cos_head(latent)
+        angular_pred = jnp.arctan2(sin_pred, cos_pred)
+
+        # Predict gating coefficients between 0.0 and 1.0 for each state index
+        # This allows the network to say "index 0 is linear, index 1 is an angle"
+        gate = jax.nn.sigmoid(self.gate_head(latent))
+
+        # Soft-blend the predictions based on what the network learned
+        reconstructed_state = (1.0 - gate) * linear_pred + gate * angular_pred
+
+        return reconstructed_state
+
 class DreamerTitansWrapper(eqx.Module):
     """
     A drop-in replacement for the GRU cell block in DreamerV3.
@@ -248,7 +367,8 @@ class FlowDynamics(eqx.Module):
     """
     Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
-
+    encoder: AgnosticObservationEncoder
+    decoder: AgnosticObservationDecoder
     flow: Transformed
     memory: DreamerTitansWrapper
     state_high: jax.Array
@@ -271,7 +391,10 @@ class FlowDynamics(eqx.Module):
         self.state_high = jnp.broadcast_to(state_high, (state_dim,))
 
         self.memory = DreamerTitansWrapper(state_dim=state_dim, action_dim=action_dim, hidden_dim=deter_dim, key=key)
-        base_key, flow_key = jax.random.split(key)
+        encoder_key, decoder_key, base_key, flow_key = jax.random.split(key, 4)
+
+        self.encoder = AgnosticObservationEncoder(input_dim=state_dim, embedding_dim=state_dim, key=encoder_key)
+        self.decoder = AgnosticObservationDecoder(input_dim=state_dim, embedding_dim=state_dim, key=decoder_key)
 
         if flow is None:
             # Define a base distribution matching the state delta dimension
@@ -298,8 +421,9 @@ class FlowDynamics(eqx.Module):
     ) -> tuple[jax.Array, jax.Array]:
         """Samples a structural residual transition delta and adds it to s_t."""
         # Update hidden state and fast weights
-        next_hidden, next_fast_weights = self.memory.step(prev_state, prev_action, prev_fast_weights)
-        delta_s = self.flow.sample(key, condition=next_hidden)
+        latent_state = self.encoder(prev_state)
+        next_hidden, next_fast_weights = self.memory.step(latent_state, prev_action, prev_fast_weights)
+        delta_s = self.decoder(self.flow.sample(key, condition=next_hidden))
         return jnp.clip(prev_state + delta_s, self.state_low, self.state_high), next_fast_weights
 
     def log_prob(
