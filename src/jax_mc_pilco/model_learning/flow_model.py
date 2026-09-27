@@ -19,7 +19,7 @@ class AgnosticObservationEncoder(eqx.Module):
         self,
         input_dim: int,
         embedding_dim: int,
-        num_frequencies: int = 4,
+        num_frequencies: int = 2,
         *,
         key: jtp.Key[jtp.Array, ""],
     ) -> None:
@@ -76,11 +76,12 @@ class AgnosticObservationDecoder(eqx.Module):
     def __init__(
         self,
         input_dim: int,
-        embedding_dim: int = 128,
+        embedding_dim: int,
         *,
         key: jtp.Key[jtp.Array, ""],
     ) -> None:
         self.input_dim = input_dim
+        embedding_dim = input_dim
 
         # Split keys for all independent heads
         keys = jax.random.split(key, 5)
