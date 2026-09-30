@@ -5,129 +5,92 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
-from flowjax.distributions import AbstractDistribution, Transformed
+from flowjax.bijections import AbstractBijection, Chain, Concatenate, Invert, Permute, RationalQuadraticSpline
+from flowjax.distributions import AbstractDistribution, StandardNormal, Transformed, Uniform
 from flowjax.flows import coupling_flow
 
 
-class AgnosticObservationEncoder(eqx.Module):
-    encoder: eqx.nn.Sequential
-    input_dim: int = eqx.field(static=True)
-    num_frequencies: int = eqx.field(static=True)
-    encoded_dim: int = eqx.field(static=True)
+class StackDistribution(AbstractDistribution):
+    """Stack scalar distributions."""
+
+    dists: tuple[AbstractDistribution]
+    shape: tuple[int, ...]
+    cond_shape: typing.ClassVar[None] = None
 
     def __init__(
         self,
-        input_dim: int,
-        embedding_dim: int,
-        num_frequencies: int = 2,
-        *,
-        key: jtp.Key[jtp.Array, ""],
-    ) -> None:
-        self.input_dim = input_dim
-        self.num_frequencies = num_frequencies
+        base_dists: typing.Sequence[AbstractDistribution],
+    ):
+        for dist in base_dists:
+            if dist.shape != () or dist.cond_shape is not None:
+                raise ValueError("Only scalar unconditional distributions supported.")
 
-        # Create geometric/log-spaced frequencies (1, 2, 4, 8...)
+        self.dists = tuple(base_dists)  # type: ignore
+        self.shape = (len(base_dists),)
 
-        # Calculate final size: raw value + sin features + cos features
-        self.encoded_dim = input_dim * (1 + 2 * num_frequencies)
+    def _log_prob(self, x: jtp.Array, condition: jtp.Array | None = None) -> jtp.Array:
+        return jnp.sum(
+            jnp.array(
+                dist.log_prob(xi, condition=condition)
+                for dist, xi in zip(self.dists, x)
+            )
+        )
 
-        # Standard Equinox linear layers
-        key1, key2 = jax.random.split(key, 2)
-        self.encoder = eqx.nn.Sequential([
-            eqx.nn.Linear(self.encoded_dim, embedding_dim, key=key1),
-            eqx.nn.Lambda(jax.nn.mish),
-            eqx.nn.Linear(embedding_dim, embedding_dim, key=key2),
-            eqx.nn.Lambda(jax.nn.mish),
-        ])
+    def _sample(
+        self, key: jtp.Key[jtp.Array, ""], condition: jtp.Array | None = None
+    ) -> jtp.Array:
+        keys = jax.random.split(key, self.shape)
+        return jnp.stack(
+            [dist.sample(k, condition=condition) for dist, k in zip(self.dists, keys)]
+        )
 
-    @property
-    def frequencies(self) -> jtp.Array:
-        return jnp.pow(2.0, jnp.arange(self.num_frequencies, dtype=jnp.float32))
 
-    def __call__(self, x: jtp.Array) -> jtp.Array:
-        """
-        Processes a single observation vector `x` of shape (input_dim,).
-        To process batches, use jax.vmap(encoder).
-        """
-        # x_expanded shape: (input_dim, 1)
-        x_expanded = jnp.expand_dims(x, axis=-1)
+class CircularRationalQuadraticSpline(AbstractBijection):
+    """
+    Circular Rational Quadratic Spline Bijection mapping [-pi, pi] to [-pi, pi].
+    """
+    shape = ()
+    cond_shape = None
+    shift_value: float
+    spline: RationalQuadraticSpline
 
-        # Outer product via broadcasting to compute multi-frequency angles
-        # scaled shape: (input_dim, num_frequencies)
-        scaled = x_expanded * self.frequencies
+    def __init__(self, knots: int = 8, *, shift_value: float = 0.0) -> None:
+        self.shift_value = shift_value
+        # We model the periodic box specifically bound tightly on [-pi, pi]
+        self.spline = RationalQuadraticSpline(
+            knots=knots,
+            interval=float(jnp.pi),
+        )
 
-        # Flatten the sin and cos projections into 1D arrays
-        sin_feats = jnp.ravel(jnp.sin(scaled))
-        cos_feats = jnp.ravel(jnp.cos(scaled))
+    def shift(self, x: jtp.ArrayLike) -> jtp.Array:
+        return jnp.mod(x + jnp.pi, 2.0 * jnp.pi) - jnp.pi
 
-        # Combine the original values with the periodic representations
-        features = jnp.concatenate([x, sin_feats, cos_feats], axis=-1)
-
-        return self.encoder(features)
-
-class AgnosticObservationDecoder(eqx.Module):
-    decoder_backbone: eqx.nn.Sequential
-    linear_head: eqx.nn.Linear
-    angle_sin_head: eqx.nn.Linear
-    angle_cos_head: eqx.nn.Linear
-    gate_head: eqx.nn.Linear
-    input_dim: int = eqx.field(static=True)
-
-    def __init__(
+    def transform_and_log_det(
         self,
-        input_dim: int,
-        embedding_dim: int,
-        *,
-        key: jtp.Key[jtp.Array, ""],
-    ) -> None:
-        self.input_dim = input_dim
-        embedding_dim = input_dim
+        x: jtp.ArrayLike,
+        condition: jtp.ArrayLike | None = None,
+    ) -> tuple[jtp.Array, jtp.Array]:
+        # Enforce periodic boundary constraints wrapping natively around the circular domain
+        x_shifted = self.shift(x)
 
-        # Split keys for all independent heads
-        keys = jax.random.split(key, 5)
+        # Forward pass through the base RationalQuadraticSpline transformer
+        y_shifted, log_det_jacobian = self.spline.transform_and_log_det(
+            x_shifted, condition
+        )
+        # Undo shift wrapping safely
+        y = self.shift(y_shifted)
+        return y, log_det_jacobian
 
-        # Shared feature processing
-        self.decoder_backbone = eqx.nn.Sequential([
-            eqx.nn.Linear(embedding_dim, embedding_dim, key=keys[0]),
-            eqx.nn.Lambda(jax.nn.mish),
-            eqx.nn.Linear(embedding_dim, embedding_dim, key=keys[1]),
-            eqx.nn.Lambda(jax.nn.mish),
-        ])
+    def inverse_and_log_det(
+        self, y: jtp.ArrayLike, condition: jtp.ArrayLike | None = None
+    ) -> tuple[jtp.Array, jtp.Array]:
+        y_shifted = self.shift(y)
+        x_shifted, log_det_jacobian = self.spline.inverse_and_log_det(
+            y_shifted, condition
+        )
+        x = self.shift(x_shifted)
+        return x, log_det_jacobian
 
-        # Head 1: Predicts direct linear values (positions, velocities)
-        self.linear_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[2])
-
-        # Head 2 & 3: Predicts sin/cos pairs to robustly reconstruct angles
-        self.angle_sin_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[3])
-        self.angle_cos_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[4])
-
-        # Head 4: Learns a per-element gate (0 = linear, 1 = angular)
-        self.gate_head = eqx.nn.Linear(embedding_dim, input_dim, key=keys[5])
-
-    def __call__(self, embedding: jtp.Array) -> jtp.Array:
-        """
-        Decodes a single embedding vector of shape (embedding_dim,) 
-        back to the original state space of shape (input_dim,).
-        """
-        # Extract deep features
-        latent = self.decoder_backbone(embedding)
-
-        # Compute the linear hypothesis
-        linear_pred = self.linear_head(latent)
-
-        # Compute the angular hypothesis using arctan2(sin, cos)
-        sin_pred = self.angle_sin_head(latent)
-        cos_pred = self.angle_cos_head(latent)
-        angular_pred = jnp.arctan2(sin_pred, cos_pred)
-
-        # Predict gating coefficients between 0.0 and 1.0 for each state index
-        # This allows the network to say "index 0 is linear, index 1 is an angle"
-        gate = jax.nn.sigmoid(self.gate_head(latent))
-
-        # Soft-blend the predictions based on what the network learned
-        reconstructed_state = (1.0 - gate) * linear_pred + gate * angular_pred
-
-        return reconstructed_state
 
 class DreamerTitansWrapper(eqx.Module):
     """
@@ -368,8 +331,6 @@ class FlowDynamics(eqx.Module):
     """
     Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
-    encoder: AgnosticObservationEncoder
-    decoder: AgnosticObservationDecoder
     flow: Transformed
     memory: DreamerTitansWrapper
     state_high: jax.Array
@@ -380,6 +341,7 @@ class FlowDynamics(eqx.Module):
         key: jtp.Key[jtp.Array, ""],
         state_dim: int,
         action_dim: int,
+        angle_dims: typing.Sequence[int],
         state_low: jax.Array,
         state_high: jax.Array,
         deter_dim: int = 64,
@@ -390,24 +352,56 @@ class FlowDynamics(eqx.Module):
 
         self.state_low = jnp.broadcast_to(state_low, (state_dim,))
         self.state_high = jnp.broadcast_to(state_high, (state_dim,))
+        memory_key, norm_flow_key, circle_flow_key = jax.random.split(key, 3)
 
-        self.memory = DreamerTitansWrapper(state_dim=state_dim, action_dim=action_dim, hidden_dim=deter_dim, key=key)
-        encoder_key, decoder_key, base_key, flow_key = jax.random.split(key, 4)
+        self.memory = DreamerTitansWrapper(state_dim=state_dim, action_dim=action_dim, hidden_dim=deter_dim, key=memory_key)
 
-        self.encoder = AgnosticObservationEncoder(input_dim=state_dim, embedding_dim=state_dim, key=encoder_key)
-        self.decoder = AgnosticObservationDecoder(input_dim=state_dim, embedding_dim=state_dim, key=decoder_key)
 
         if flow is None:
-            # Define a base distribution matching the state delta dimension
-            base_dist = ConditionalMVN(base_key, dim=state_dim, cond_dim=deter_dim)
-            flow = coupling_flow(
-                key=flow_key,
-                base_dist=base_dist,
+            all_dims = set(range(state_dim))
+            normal_dims = sorted(list(all_dims - set(angle_dims)))
+            num_normal_dims = len(normal_dims)
+            num_angle_dims = len(angle_dims)
+
+            permutation_indices = jnp.array(normal_dims + list(angle_dims))
+            forward_permutation = Permute(permutation_indices)
+            normal_flow = coupling_flow(
+                key=norm_flow_key,
+                base_dist=StandardNormal(shape=(num_normal_dims,)),
+                transformer=RationalQuadraticSpline(knots=8, interval=10.0),
                 cond_dim=deter_dim,
                 nn_width=256,
                 nn_depth=2,
                 flow_layers=flow_layers,
             )
+            circle_flow = coupling_flow(
+                key=circle_flow_key,
+                base_dist=Uniform(
+                    minval=jnp.full((num_angle_dims,), -jnp.pi),
+                    maxval=jnp.full((num_angle_dims,), jnp.pi),
+                ),
+                transformer=CircularRationalQuadraticSpline(knots=8),
+                cond_dim=deter_dim,
+                nn_width=256,
+                nn_depth=2,
+                flow_layers=flow_layers,
+            )
+            combined_bijection = Concatenate(
+                [normal_flow.bijection, circle_flow.bijection]
+            )
+            full_pipeline_bijection = Chain(
+                [forward_permutation, combined_bijection, Invert(forward_permutation)]
+            )
+
+            dists = [StandardNormal()] * num_normal_dims + [
+                Uniform(
+                    minval=-jnp.pi,
+                    maxval=jnp.pi,
+                )
+            ] * num_angle_dims
+            joint_base = StackDistribution(dists)
+            flow = Transformed(joint_base, full_pipeline_bijection)
+
         self.flow = flow
 
         # TODO: utilize a chained sigmoid and affine to constrain the flow
@@ -422,9 +416,8 @@ class FlowDynamics(eqx.Module):
     ) -> tuple[jax.Array, jax.Array]:
         """Samples a structural residual transition delta and adds it to s_t."""
         # Update hidden state and fast weights
-        latent_state = self.encoder(prev_state)
-        next_hidden, next_fast_weights = self.memory.step(latent_state, prev_action, prev_fast_weights)
-        delta_s = self.decoder(self.flow.sample(key, condition=next_hidden))
+        next_hidden, next_fast_weights = self.memory.step(prev_state, prev_action, prev_fast_weights)
+        delta_s = self.flow.sample(key, condition=next_hidden)
         return jnp.clip(prev_state + delta_s, self.state_low, self.state_high), next_fast_weights
 
     def log_prob(
