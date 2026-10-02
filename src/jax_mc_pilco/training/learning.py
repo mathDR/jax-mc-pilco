@@ -22,8 +22,9 @@ jax.config.update("jax_enable_x64", True)
 def world_training_loop(
     key: jtp.Key[jtp.Array, ""],
     states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
+    next_states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
-    world_model: FlowDynamics | None = None,
+    world_model: FlowDynamics,
     optimizer: optax.GradientTransformation | None = None,
     batch_size: int = 512,
     max_epochs: int = 1000,
@@ -37,15 +38,6 @@ def world_training_loop(
 
     key, subkey = jax.random.split(key)
 
-    if world_model is None:
-        world_model = FlowDynamics(
-            key=subkey,
-            state_dim=states.shape[-1],
-            action_dim=actions.shape[-1],
-            state_low=states.min(axis=tuple(range(states.ndim - 1))),
-            state_high=states.max(axis=tuple(range(states.ndim - 1))),
-        )
-
     # Setup Optax optimizer
     if optimizer is None:
         optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate))
@@ -57,7 +49,7 @@ def world_training_loop(
     best_params = params
     opt_state = optimizer.init(params)
 
-    data = (states, actions)
+    data = (states, next_states, actions)
 
     @eqx.filter_jit
     def world_train_step(
@@ -65,6 +57,7 @@ def world_training_loop(
         static: FlowDynamics,
         _opt_state: jtp.PyTree,
         _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
+        _next_states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
         _actions: jtp.Float[jtp.Array, "batch_size seq_len action_dim"],
     ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
         """Performs a single functional gradient step update."""
@@ -73,6 +66,7 @@ def world_training_loop(
             params,
             static,
             _states,
+            _next_states,
             _actions,
         )
         updates, opt_state = optimizer.update(grads, _opt_state, params=params)
