@@ -35,8 +35,8 @@ dependencies = [
     "optax>=0.1.9",
     "pygame>=2.6.1",
     "scipy>=1.13.1",
-    "seaborn>=0.13.2",
     "typeguard>=4.5.2",
+    "types-tqdm>=4.67.3.20260205",
 ]
 
 [project.urls]
@@ -144,17 +144,8 @@ module = [
     "jaxtyping.*",
     "equinox.*",
     "gpjax.*",
-<<<<<<< HEAD
-<<<<<<< HEAD
     "jax.*",
     "optax.*",
-    "scipy.*",
-=======
-    "jax.*"
->>>>>>> parent of b821211 (getting rollout loss to work)
-=======
-    "jax.*"
->>>>>>> parent of b821211 (getting rollout loss to work)
 ]
 ignore_missing_imports = true
 # This stops mypy from tracking unimported Any's leaking out from these specific libraries
