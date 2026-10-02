@@ -132,19 +132,10 @@ def collect_experience(
     total_reward = 0.0
 
     if use_sobol and exploration:
-<<<<<<< HEAD
-<<<<<<< HEAD
-        actions_per_state = 64
-=======
-        actions_per_state = 4
->>>>>>> parent of b821211 (getting rollout loss to work)
-=======
-        actions_per_state = 4
->>>>>>> parent of b821211 (getting rollout loss to work)
         states, actions, next_states, rewards = collect_mbrl_transitions(
             env,
             num_states=2 ** int(jnp.log2(num_steps)),
-            actions_per_state=actions_per_state,
+            actions_per_state=64,
         )
         total_reward = 0.0
         max_episode_length = 0
@@ -175,8 +166,7 @@ def collect_experience(
                     break
 
             episode_length = len(action_ep)
-            if episode_length > max_episode_length:
-                max_episode_length = episode_length
+            max_episode_length = max(max_episode_length, episode_length)
 
             rewards.extend(ep_rewards)
             states.extend(s_curr_ep)
