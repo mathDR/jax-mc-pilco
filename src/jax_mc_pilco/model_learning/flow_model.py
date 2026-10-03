@@ -5,12 +5,59 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
-from flowjax.bijections import RationalQuadraticSpline, Sigmoid
-from flowjax.distributions import AbstractDistribution, Affine, Chain, MultivariateNormal, Transformed
-from flowjax.flows import coupling_flow
+from flowjax.bijections import AbstractBijection, Chain, Identity, RationalQuadraticSpline, Sigmoid, Stack
+from flowjax.distributions import AbstractDistribution, Affine, Chain, Transformed
+from flowjax.flows import masked_autoregressive_flow
 from paramax import non_trainable
 
 EPSILON = 1e-5
+
+class CircularRationalQuadraticSpline(AbstractBijection):
+    """
+    Circular Rational Quadratic Spline Bijection mapping [-pi, pi] to [-pi, pi].
+    """
+    shape = ()
+    cond_shape = None
+    shift_value: float
+    spline: RationalQuadraticSpline
+
+    def __init__(self, knots: int = 8, *, shift_value: float = 0.0) -> None:
+        self.shift_value = shift_value
+        # We model the periodic box specifically bound tightly on [-pi, pi]
+        self.spline = RationalQuadraticSpline(
+            knots=knots,
+            interval=float(jnp.pi),
+        )
+
+    def shift(self, x: jtp.ArrayLike) -> jtp.Array:
+        return jnp.mod(x + jnp.pi, 2.0 * jnp.pi) - jnp.pi
+
+    def transform_and_log_det(
+        self,
+        x: jtp.ArrayLike,
+        condition: jtp.ArrayLike | None = None,
+    ) -> tuple[jtp.Array, jtp.Array]:
+        # Enforce periodic boundary constraints wrapping natively around the circular domain
+        x_shifted = self.shift(x)
+
+        # Forward pass through the base RationalQuadraticSpline transformer
+        y_shifted, log_det_jacobian = self.spline.transform_and_log_det(
+            x_shifted, condition
+        )
+        # Undo shift wrapping safely
+        y = self.shift(y_shifted)
+        return y, log_det_jacobian
+
+    def inverse_and_log_det(
+        self, y: jtp.ArrayLike, condition: jtp.ArrayLike | None = None
+    ) -> tuple[jtp.Array, jtp.Array]:
+        y_shifted = self.shift(y)
+        x_shifted, log_det_jacobian = self.spline.inverse_and_log_det(
+            y_shifted, condition
+        )
+        x = self.shift(x_shifted)
+        return x, log_det_jacobian
+
 
 class ConditionalMVN(AbstractDistribution):
     """Multivariate normal base distribution whose loc and covariance
@@ -119,17 +166,14 @@ class FlowDynamics(eqx.Module):
         self.state_low = jnp.broadcast_to(state_low, (state_dim,))
         self.state_high = jnp.broadcast_to(state_high, (state_dim,))
 
-        key, flow_key = jax.random.split(key, 2)
+        key, base_key, flow_key = jax.random.split(key, 3)
 
         self.memory = eqx.nn.GRUCell(input_size=cond_dim, hidden_size=deter_dim, key=key)
 
         if base_flow is None:
             # Define a base distribution matching the state delta dimension
-            base_dist = MultivariateNormal(
-                loc=jnp.zeros(state_dim, dtype=float),
-                covariance=jnp.eye(state_dim, dtype=float),
-            )
-            base_flow = coupling_flow(
+            base_dist = ConditionalMVN(base_key, dim=state_dim, cond_dim=deter_dim)
+            base_flow = masked_autoregressive_flow(
                 key=flow_key,
                 base_dist=base_dist,
                 cond_dim=deter_dim,
@@ -141,15 +185,27 @@ class FlowDynamics(eqx.Module):
                 nn_depth=2,
                 flow_layers=flow_layers,
             )
+        mixed_bijectors = [
+            RationalQuadraticSpline(knots=8, interval=3.0),      # Position (bounded domain spline)
+            CircularRationalQuadraticSpline(knots=8),            # Angle 1 (your custom periodic spline)
+            CircularRationalQuadraticSpline(knots=8),            # Angle 2 (your custom periodic spline)
+            Identity(),                                          # Velocity pos (unconstrained)
+            Identity(),                                          # Velocity angle 1 (unconstrained)
+            Identity(),                                          # Velocity angle 2 (unconstrained)
+        ]
+
+        # This creates a single bijection acting element-wise across the dimensions
+        final_constraints = Stack(mixed_bijectors)
         squash = Chain([
             Sigmoid(shape=(state_dim,)),  # type: ignore  # R -> (0, 1)  # noqa: PGH003
             Affine(
-                loc=self.state_low,
-                scale=self.state_high - self.state_low,
+                loc=self.state_low-EPSILON,
+                scale=2*EPSILON + self.state_high - self.state_low,
             ),  # (0, 1) -> (low, high)
         ])
 
-        self.flow = Transformed(base_flow, non_trainable(squash))
+        self.flow = Transformed(base_flow, Chain([final_constraints, non_trainable(squash)]))
+
 
     def predict_next_state_and_hidden(
         self,

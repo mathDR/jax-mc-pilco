@@ -40,7 +40,26 @@ def world_training_loop(
 
     # Setup Optax optimizer
     if optimizer is None:
-        optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate))
+        schedule = optax.sgdr_schedule([
+            {
+                "init_value": 1e-3, 
+                "peak_value": 1e-3, 
+                "warmup_steps": 0, 
+                "decay_steps": 5000, 
+                "end_value": 1e-5
+            },
+            {
+                "init_value": 1e-3, 
+                "peak_value": 1e-3, 
+                "warmup_steps": 0, 
+                "decay_steps": 5000, 
+                "end_value": 1e-5
+            }
+        ])
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(5.0),    # Clip gradients at 5.0 global norm
+            optax.adam(learning_rate=schedule)  # Apply Adam using our schedule
+        )
     params, static = eqx.partition(
         world_model,
         eqx.is_inexact_array,
@@ -118,7 +137,7 @@ def rollout_training_loop(
     states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
     next_states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " num_episodes seq_len action_dim"],
-    world_model: FlowDynamics | None = None,
+    world_model: FlowDynamics,
     optimizer: optax.GradientTransformation | None = None,
     batch_size: int = 512,
     max_epochs: int = 1000,
@@ -131,15 +150,6 @@ def rollout_training_loop(
     """Standard training loop for the world model."""
 
     key, subkey = jax.random.split(key)
-
-    if world_model is None:
-        world_model = FlowDynamics(
-            key=subkey,
-            state_dim=states.shape[-1],
-            action_dim=actions.shape[-1],
-            state_low=states.min(axis=tuple(range(states.ndim - 1))),
-            state_high=states.max(axis=tuple(range(states.ndim - 1))),
-        )
 
     # Setup Optax optimizer
     if optimizer is None:
