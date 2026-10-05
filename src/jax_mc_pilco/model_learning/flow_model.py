@@ -5,8 +5,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
-from flowjax.bijections import AbstractBijection, Chain, Identity, RationalQuadraticSpline, Sigmoid, Stack
-from flowjax.distributions import AbstractDistribution, Affine, Chain, Transformed
+from flowjax.bijections import AbstractBijection, Chain, RationalQuadraticSpline, Sigmoid
+from flowjax.distributions import AbstractDistribution, Affine, StandardNormal, Transformed
 from flowjax.flows import masked_autoregressive_flow
 from paramax import non_trainable
 
@@ -142,7 +142,6 @@ class FlowDynamics(eqx.Module):
     """
     Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
-
     flow: Transformed
     memory: eqx.nn.GRUCell
     state_high: jax.Array
@@ -172,39 +171,21 @@ class FlowDynamics(eqx.Module):
 
         if base_flow is None:
             # Define a base distribution matching the state delta dimension
-            base_dist = ConditionalMVN(base_key, dim=state_dim, cond_dim=deter_dim)
+
             base_flow = masked_autoregressive_flow(
                 key=flow_key,
-                base_dist=base_dist,
+                base_dist = ConditionalMVN(base_key, dim=state_dim, cond_dim=deter_dim),
                 cond_dim=deter_dim,
                 transformer=RationalQuadraticSpline(
                     knots=8,
-                    interval=(min(self.state_low).item(), max(self.state_high).item()),
+                    interval=10.,
                 ),
                 nn_width=256,
                 nn_depth=2,
                 flow_layers=flow_layers,
             )
-        mixed_bijectors = [
-            RationalQuadraticSpline(knots=8, interval=3.0),      # Position (bounded domain spline)
-            CircularRationalQuadraticSpline(knots=8),            # Angle 1 (your custom periodic spline)
-            CircularRationalQuadraticSpline(knots=8),            # Angle 2 (your custom periodic spline)
-            Identity(),                                          # Velocity pos (unconstrained)
-            Identity(),                                          # Velocity angle 1 (unconstrained)
-            Identity(),                                          # Velocity angle 2 (unconstrained)
-        ]
 
-        # This creates a single bijection acting element-wise across the dimensions
-        final_constraints = Stack(mixed_bijectors)
-        squash = Chain([
-            Sigmoid(shape=(state_dim,)),  # type: ignore  # R -> (0, 1)  # noqa: PGH003
-            Affine(
-                loc=self.state_low-EPSILON,
-                scale=2*EPSILON + self.state_high - self.state_low,
-            ),  # (0, 1) -> (low, high)
-        ])
-
-        self.flow = Transformed(base_flow, Chain([final_constraints, non_trainable(squash)]))
+        self.flow = base_flow
 
 
     def predict_next_state_and_hidden(
@@ -218,18 +199,16 @@ class FlowDynamics(eqx.Module):
         context = jnp.concatenate([prev_state, prev_action], axis=-1)
         # Update hidden state
         next_hidden = self.memory(context, prev_hidden)
-        next_state = self.flow.sample(key, condition=next_hidden)
-        return jnp.clip(next_state, self.state_low, self.state_high), next_hidden
+        next_state_delta = self.flow.sample(key, condition=next_hidden)
+        return jnp.clip(next_state_delta + prev_state, self.state_low, self.state_high), next_hidden
 
     def log_prob(
         self,
-        state: jax.Array,
+        state_delta: jax.Array,
         context: jax.Array,
     ) -> jax.Array:
         """Calculates exact log-likelihood of the state given the context."""
-        eps = EPSILON * (self.state_high - self.state_low)
-        clipped_state = jnp.clip(state, self.state_low + eps, self.state_high - eps)
-        return self.flow.log_prob(clipped_state, condition=context)
+        return self.flow.log_prob(state_delta, condition=context)
 
     def predict_reward(self, state: jax.Array) -> jax.Array:
         # Returns a scalar value for the given latent state representation

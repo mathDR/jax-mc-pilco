@@ -30,13 +30,13 @@ def single_trajectory_loss(
         context = jnp.concatenate([prev_state, prev_action], axis=-1)
         next_hidden = world_model.memory(context, current_hidden)
 
-        # Pass next_hidden forward, but also record it as the step output
+        # Pass next_hidden forward, but record the normalized for use in log_prob
         return next_hidden, next_hidden
 
     # Get the sequence of contexts (shape: [seq_len - 1, hidden_dim])
     _, contexts = jax.lax.scan(scan_fn, init_hidden, (states, actions))
 
-    nll_losses = -world_model.log_prob(next_states, context=contexts)
+    nll_losses = -eqx.filter_vmap(world_model.log_prob, in_axes=(0,0))(next_states-states, contexts)
 
     return jnp.mean(nll_losses)
 
