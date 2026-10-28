@@ -5,58 +5,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
-from flowjax.bijections import AbstractBijection, Chain, RationalQuadraticSpline, Sigmoid
-from flowjax.distributions import AbstractDistribution, Affine, StandardNormal, Transformed
+from flowjax.bijections import RationalQuadraticSpline
+from flowjax.distributions import AbstractDistribution, Transformed
 from flowjax.flows import masked_autoregressive_flow
-from paramax import non_trainable
+
+from jax_mc_pilco.model_learning.modules import Decoder, Encoder
 
 EPSILON = 1e-5
-
-class CircularRationalQuadraticSpline(AbstractBijection):
-    """
-    Circular Rational Quadratic Spline Bijection mapping [-pi, pi] to [-pi, pi].
-    """
-    shape = ()
-    cond_shape = None
-    shift_value: float
-    spline: RationalQuadraticSpline
-
-    def __init__(self, knots: int = 8, *, shift_value: float = 0.0) -> None:
-        self.shift_value = shift_value
-        # We model the periodic box specifically bound tightly on [-pi, pi]
-        self.spline = RationalQuadraticSpline(
-            knots=knots,
-            interval=float(jnp.pi),
-        )
-
-    def shift(self, x: jtp.ArrayLike) -> jtp.Array:
-        return jnp.mod(x + jnp.pi, 2.0 * jnp.pi) - jnp.pi
-
-    def transform_and_log_det(
-        self,
-        x: jtp.ArrayLike,
-        condition: jtp.ArrayLike | None = None,
-    ) -> tuple[jtp.Array, jtp.Array]:
-        # Enforce periodic boundary constraints wrapping natively around the circular domain
-        x_shifted = self.shift(x)
-
-        # Forward pass through the base RationalQuadraticSpline transformer
-        y_shifted, log_det_jacobian = self.spline.transform_and_log_det(
-            x_shifted, condition
-        )
-        # Undo shift wrapping safely
-        y = self.shift(y_shifted)
-        return y, log_det_jacobian
-
-    def inverse_and_log_det(
-        self, y: jtp.ArrayLike, condition: jtp.ArrayLike | None = None
-    ) -> tuple[jtp.Array, jtp.Array]:
-        y_shifted = self.shift(y)
-        x_shifted, log_det_jacobian = self.spline.inverse_and_log_det(
-            y_shifted, condition
-        )
-        x = self.shift(x_shifted)
-        return x, log_det_jacobian
 
 
 class ConditionalMVN(AbstractDistribution):
@@ -80,7 +35,7 @@ class ConditionalMVN(AbstractDistribution):
         depth: int = 2,
     ) -> None:
         self.shape = (dim,)
-        self.cond_shape = (cond_dim,)
+        self.cond_shape: tuple[int, ...] = (cond_dim,)  # type: ignore
         self.dim = dim
 
         n_offdiag = dim * (dim - 1) // 2
@@ -142,51 +97,58 @@ class FlowDynamics(eqx.Module):
     """
     Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
+
+    latent_state_dim: int
+    decoder: Decoder
     flow: Transformed
     memory: eqx.nn.GRUCell
-    state_high: jax.Array
-    state_low: jax.Array
+    encoder: Encoder
 
     def __init__(
         self,
         key: jtp.Key[jtp.Array, ""],
-        state_dim: int,
+        latent_state_dim: int,
         action_dim: int,
-        state_low: jax.Array,
-        state_high: jax.Array,
         deter_dim: int = 64,
-        flow_layers: int = 4,
-        *,
-        base_flow: Transformed | None = None,
+        flow_layers: int = 2,
+        in_channels=3,
+        num_spatial_layers: int = 4,
     ):
         # Context consists of current state and taken action
-        cond_dim = state_dim + action_dim
+        # The encoder returns arrays of size (latent_state_dim, 4, 4)
+        self.latent_state_dim = 16 * latent_state_dim
+        cond_dim = self.latent_state_dim + action_dim
 
-        self.state_low = jnp.broadcast_to(state_low, (state_dim,))
-        self.state_high = jnp.broadcast_to(state_high, (state_dim,))
-
-        key, base_key, flow_key = jax.random.split(key, 3)
+        key, base_key, flow_key, encoder_key, decoder_key = jax.random.split(key, 5)
 
         self.memory = eqx.nn.GRUCell(input_size=cond_dim, hidden_size=deter_dim, key=key)
 
-        if base_flow is None:
-            # Define a base distribution matching the state delta dimension
+        self.flow = masked_autoregressive_flow(
+            key=flow_key,
+            base_dist=ConditionalMVN(base_key, dim=self.latent_state_dim, cond_dim=deter_dim),
+            cond_dim=deter_dim,
+            transformer=RationalQuadraticSpline(
+                knots=8,
+                interval=10.0,
+            ),
+            nn_width=256,
+            nn_depth=2,
+            flow_layers=flow_layers,
+        )
 
-            base_flow = masked_autoregressive_flow(
-                key=flow_key,
-                base_dist = ConditionalMVN(base_key, dim=state_dim, cond_dim=deter_dim),
-                cond_dim=deter_dim,
-                transformer=RationalQuadraticSpline(
-                    knots=8,
-                    interval=10.,
-                ),
-                nn_width=256,
-                nn_depth=2,
-                flow_layers=flow_layers,
-            )
+        self.decoder = Decoder(
+            out_channels=in_channels,
+            hid_channels=latent_state_dim,
+            num_spatial_layers=num_spatial_layers,
+            key=decoder_key,
+        )
 
-        self.flow = base_flow
-
+        self.encoder = Encoder(
+            in_channels=in_channels,
+            hid_channels=latent_state_dim,
+            num_spatial_layers=num_spatial_layers,
+            key=encoder_key,
+        )
 
     def predict_next_state_and_hidden(
         self,
@@ -200,7 +162,7 @@ class FlowDynamics(eqx.Module):
         # Update hidden state
         next_hidden = self.memory(context, prev_hidden)
         next_state_delta = self.flow.sample(key, condition=next_hidden)
-        return jnp.clip(next_state_delta + prev_state, self.state_low, self.state_high), next_hidden
+        return next_state_delta + prev_state, next_hidden
 
     def log_prob(
         self,
@@ -210,23 +172,15 @@ class FlowDynamics(eqx.Module):
         """Calculates exact log-likelihood of the state given the context."""
         return self.flow.log_prob(state_delta, condition=context)
 
-    def predict_reward(self, state: jax.Array) -> jax.Array:
-        # Returns a scalar value for the given latent state representation
-        x = state[0]
-        y = jnp.arctan2(state[2], state[4])
-        v1 = state[5]
-        v2 = state[6]
+    def __call__(
+        self,
+        obs: jax.Array,
+        action: jax.Array,
+        hidden: jax.Array,
+        key: jtp.Key[jtp.Array, ""],
+    ) -> tuple[jax.Array, jax.Array]:
+        latent_state = self.encoder(obs)
+        next_state, next_hidden = self.predict_next_state_and_hidden(key, latent_state, action, hidden)
+        out = self.decoder(next_state)
 
-        dist_penalty = 0.01 * x**2 + (y - 2) ** 2
-        vel_penalty = 1e-3 * v1**2 + 5e-3 * v2**2
-        # Condition: y <= 1 -> invert it so True means "alive" (y > 1)
-        is_alive = y > 1.0
-
-        # jax.lax.cond(pred, true_fn, false_fn, *operands)
-        alive_bonus = jax.lax.cond(
-            is_alive,
-            lambda _: 10.0,  # If True (y > 1), return 10.0
-            lambda _: 0.0,  # If False (y <= 1), return 0.0
-            operand=None,
-        )
-        return jnp.array(alive_bonus - dist_penalty - vel_penalty)
+        return out, next_hidden
