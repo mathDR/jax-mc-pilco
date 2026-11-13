@@ -68,10 +68,10 @@ def world_training_loop(
         loss_value, grads = eqx.filter_value_and_grad(batched_trajectory_loss)(
             params,
             static,
+            _key,
             _states,
             _next_states,
             _actions,
-            _key,
         )
         updates, opt_state = optimizer.update(grads, _opt_state, params=params)
         params = eqx.apply_updates(params, updates)

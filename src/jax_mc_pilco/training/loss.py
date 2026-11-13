@@ -61,10 +61,10 @@ def single_trajectory_loss(
 def batched_trajectory_loss(
     world_model_params: FlowDynamics,
     world_model_static: FlowDynamics,
+    key: jtp.Key[jtp.Array, ""],
     states: jtp.Float[jtp.Array, " seq_len state_dim"],
     next_states: jtp.Float[jtp.Array, " seq_len state_dim"],
     actions: jtp.Float[jtp.Array, " seq_len action_dim"],
-    key: jtp.Key[jtp.Array, ""],
 ) -> jtp.Float[jtp.Array, ""]:
     """Compute the vmapped loss over all the trajectories."""
     keys = jax.random.split(key, actions.shape[0])

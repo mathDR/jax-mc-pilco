@@ -72,9 +72,9 @@ for traj_idx in range(NUM_TRAJECTORIES):
         print(f"Collected {traj_idx + 1}/{NUM_TRAJECTORIES} trajectories.")
 
 print("Data collection complete! Buffer is fully populated.")
-breakpoint()
+
 trajectories = jax.device_put(trajectories, jax.devices("cpu")[0])
-breakpoint()
+
 stacked_trajectories = jax.tree_util.tree_map(lambda *args: jnp.concatenate(args, axis=0), *trajectories)
 del trajectories
 # Save the full buffer state to disk
