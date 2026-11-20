@@ -5,6 +5,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
+import paramax
 from flowjax.bijections import RationalQuadraticSpline
 from flowjax.distributions import AbstractDistribution, Transformed
 from flowjax.flows import masked_autoregressive_flow
@@ -98,10 +99,14 @@ class FlowDynamics(eqx.Module):
     Conditional Normalizing Flow dynamics model with GRUCell for recurrent memory.
     """
 
-    latent_state_dim: int
-    decoder: Decoder
     flow: Transformed
     memory: eqx.nn.GRUCell
+    state_high: jtp.Array
+    state_low: jtp.Array
+    state_mean: jtp.Array
+    state_std: jtp.Array
+    latent_state_dim: int
+    decoder: Decoder
     encoder: Encoder
 
     def __init__(
@@ -109,32 +114,61 @@ class FlowDynamics(eqx.Module):
         key: jtp.Key[jtp.Array, ""],
         latent_state_dim: int,
         action_dim: int,
-        deter_dim: int = 64,
-        flow_layers: int = 2,
-        in_channels=3,
+        state_low: jax.Array,
+        state_high: jax.Array,
+        hidden_dim: int = 128,
+        flow_layers: int = 4,
+        in_channels: int = 3,
         num_spatial_layers: int = 4,
-    ):
-        # Context consists of current state and taken action
+        *,
+        state_mean: jax.Array | None = None,
+        state_std: jax.Array | None = None,
+        base_flow: Transformed | None = None,
+    ) -> None:
+        # Context consists of current normalized state and taken action
         # The encoder returns arrays of size (latent_state_dim, 4, 4)
         self.latent_state_dim = 16 * latent_state_dim
         cond_dim = self.latent_state_dim + action_dim
 
-        key, base_key, flow_key, encoder_key, decoder_key = jax.random.split(key, 5)
-
-        self.memory = eqx.nn.GRUCell(input_size=cond_dim, hidden_size=deter_dim, key=key)
-
-        self.flow = masked_autoregressive_flow(
-            key=flow_key,
-            base_dist=ConditionalMVN(base_key, dim=self.latent_state_dim, cond_dim=deter_dim),
-            cond_dim=deter_dim,
-            transformer=RationalQuadraticSpline(
-                knots=8,
-                interval=10.0,
-            ),
-            nn_width=256,
-            nn_depth=2,
-            flow_layers=flow_layers,
+        self.state_low = paramax.non_trainable(
+            jnp.broadcast_to(state_low, (latent_state_dim,))
         )
+        self.state_high = paramax.non_trainable(
+            jnp.broadcast_to(state_high, (latent_state_dim,))
+        )
+        self.latent_state_dim = latent_state_dim
+
+        if state_mean is None:
+            state_mean = jnp.zeros((latent_state_dim,))
+        if state_std is None:
+            state_std = jnp.ones((latent_state_dim,))
+
+        self.state_mean = paramax.non_trainable(state_mean)
+        self.state_std = paramax.non_trainable(
+            jnp.where(state_std < 1e-6, 1.0, state_std)
+        )
+
+        memory_key, base_key, norm_flow_key, encoder_key, decoder_key = jax.random.split(key, 5)
+
+
+        self.memory = eqx.nn.GRUCell(
+            input_size=cond_dim, hidden_size=hidden_dim, key=memory_key
+        )
+
+        if base_flow is None:
+            base_flow = masked_autoregressive_flow(
+                key=norm_flow_key,
+                base_dist=ConditionalMVN(base_key, dim=self.latent_state_dim, cond_dim=hidden_dim),
+                cond_dim=hidden_dim,
+                transformer=RationalQuadraticSpline(
+                    knots=8,
+                    interval=10.0,
+                ),
+                nn_width=256,
+                nn_depth=2,
+                flow_layers=flow_layers,
+            )
+        self.flow = base_flow
 
         self.decoder = Decoder(
             out_channels=in_channels,
@@ -150,6 +184,30 @@ class FlowDynamics(eqx.Module):
             key=encoder_key,
         )
 
+    def normalize_state(self, state: jax.Array) -> jax.Array:
+        ret_state: jax.Array =  (state - paramax.unwrap(self.state_mean)) / paramax.unwrap(
+            self.state_std
+        )
+        return ret_state
+
+    def unnormalize_state(self, norm_state: jax.Array) -> jax.Array:
+        ret_state: jax.Array = norm_state * paramax.unwrap(self.state_std) + paramax.unwrap(
+            self.state_mean
+        )
+        return ret_state
+
+    def step_hidden(
+        self,
+        prev_state: jax.Array,
+        prev_action: jax.Array,
+        prev_hidden: jax.Array,
+    ) -> jax.Array:
+        """Advance recurrent hidden state using normalized state and action."""
+        norm_state = self.normalize_state(prev_state)
+        context = jnp.concatenate([norm_state, prev_action])
+        ret_hidden: jax.Array = self.memory(context, prev_hidden)
+        return ret_hidden
+
     def predict_next_state_and_hidden(
         self,
         key: jtp.Key[jtp.Array, ""],
@@ -157,20 +215,47 @@ class FlowDynamics(eqx.Module):
         prev_action: jax.Array,
         prev_hidden: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        """Samples a structural residual transition state."""
-        context = jnp.concatenate([prev_state, prev_action], axis=-1)
-        # Update hidden state
-        next_hidden = self.memory(context, prev_hidden)
-        next_state_delta = self.flow.sample(key, condition=next_hidden)
-        return next_state_delta + prev_state, next_hidden
+        """Samples a structural residual transition delta and adds it to s_t."""
+        norm_state = self.normalize_state(prev_state)
+        next_hidden = self.memory(
+            jnp.concatenate([norm_state, prev_action]), prev_hidden
+        )
+
+        # No stop_gradient here: gradients flow through the world model's inputs
+        # back to `prev_action` (and thus `ActionFlow`), while world_model
+        # weights remain frozen because they are not passed to the optimizer.
+        norm_state_delta = self.flow.sample(key, (), next_hidden)
+
+        next_state = jnp.clip(
+            self.unnormalize_state(norm_state + norm_state_delta),
+            paramax.unwrap(self.state_low),
+            paramax.unwrap(self.state_high),
+        )
+        return next_state, next_hidden
+
+    def sample(
+        self,
+        key: jtp.Key[jtp.Array, ""],
+        prev_state: jax.Array,
+        prev_action: jax.Array,
+        prev_hidden: jax.Array,
+    ) -> jax.Array:
+        next_state, _ = self.predict_next_state_and_hidden(
+            key, prev_state, prev_action, prev_hidden
+        )
+        return next_state
 
     def log_prob(
         self,
-        state_delta: jax.Array,
-        context: jax.Array,
+        prev_state: jax.Array,
+        next_state: jax.Array,
+        hidden: jax.Array,
     ) -> jax.Array:
-        """Calculates exact log-likelihood of the state given the context."""
-        return self.flow.log_prob(state_delta, condition=context)
+        """Calculates exact log-likelihood of the normalized state delta given hidden."""
+        norm_state_delta = self.normalize_state(next_state) - self.normalize_state(
+            prev_state
+        )
+        return self.flow.log_prob(norm_state_delta, hidden)
 
     def __call__(
         self,

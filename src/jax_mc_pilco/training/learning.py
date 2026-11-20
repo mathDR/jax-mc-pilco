@@ -16,8 +16,133 @@ from jax_mc_pilco.training.training_utils import (
     train_val_split,
 )
 
+from .rollout import batched_wm_trajectory_loss
+
+NUM_BURN_IN_STEPS = 10
 
 def world_training_loop(
+    key: jtp.Key[jtp.Array, ""],
+    states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
+    actions: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
+    next_states: jtp.Float[jtp.Array, " num_episodes seq_len state_dim"],
+    world_model: FlowDynamics,
+    optimizer: optax.GradientTransformation | None = None,
+    batch_size: int = 64,
+    val_batch_size: int = 16,
+    traj_size: int = 100,
+    max_epochs: int = 1000,
+    learning_rate: optax.ScalarOrSchedule = 3e-4,
+    val_pct: float = 0.1,
+    max_patience: int = 25,
+    return_best: bool = True,
+    show_progress: bool = True,
+) -> tuple[FlowDynamics, dict[str, list]]:
+    """Standard training loop for the world model."""
+
+    key, subkey = jax.random.split(key)
+
+    # Setup Optax optimizer
+    if optimizer is None:
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0), optax.adam(learning_rate)
+        )
+    teacher_forcing_schedule = optax.join_schedules(
+        schedules=[
+            optax.constant_schedule(0.0),
+            optax.linear_schedule(init_value=0.0, end_value=0.99, transition_steps=100),
+        ],
+        boundaries=[100],
+    )
+    params, static = eqx.partition(
+        world_model,
+        eqx.is_inexact_array,
+        is_leaf=lambda leaf: isinstance(leaf, paramax.NonTrainable),
+    )
+    best_params = params
+    opt_state = optimizer.init(params)
+
+    data = (states, actions, next_states)
+
+    @eqx.filter_jit
+    @eqx.debug.assert_max_traces(max_traces=1)
+    def world_train_step(
+        params: jtp.PyTree,
+        static: FlowDynamics,
+        key: jtp.Key[jtp.Array, ""],
+        _opt_state: jtp.PyTree,
+        ss_prob: float,
+        _states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
+        _actions: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
+        _next_states: jtp.Float[jtp.Array, "batch_size seq_len state_dim"],
+    ) -> tuple[FlowDynamics, optax.OptState, jtp.Float[jtp.Array, ""]]:
+        """Performs a single functional gradient step update."""
+        loss_value, grads = eqx.filter_value_and_grad(batched_wm_trajectory_loss)(
+            params,
+            static,
+            key,
+            ss_prob,
+            _states,
+            _actions,
+            _next_states,
+        )
+        updates, opt_state = optimizer.update(grads, _opt_state, params=params)
+        params = eqx.apply_updates(params, updates)
+        return params, opt_state, loss_value
+
+    key, subkey = jax.random.split(key)
+    train_data, val_data = train_val_split(subkey, data, val_prop=val_pct)
+    losses: dict[str, list] = {"train": [], "val": []}
+
+    loop = tqdm.tqdm(range(max_epochs), disable=not show_progress)
+    jitted_batched_trajectory_loss = eqx.filter_jit(batched_wm_trajectory_loss)
+
+    global_step: int = 0
+
+    for _ in loop:
+        # Shuffle data
+        key, *subkeys = jax.random.split(key, 3)
+        train_data = [jax.random.permutation(subkeys[0], a) for a in train_data]
+        val_data = [jax.random.permutation(subkeys[1], a) for a in val_data]
+
+        # Train epoch
+        train_batch_losses = []
+        for batch in zip(
+            *get_batches(train_data, batch_size, traj_size + NUM_BURN_IN_STEPS),
+            strict=True,
+        ):
+            key, subkey = jax.random.split(key)
+            ss_prob = teacher_forcing_schedule(global_step)
+            params, opt_state, loss_i = world_train_step(
+                params, static, subkey, opt_state, ss_prob, *batch
+            )
+            train_batch_losses.append(loss_i)
+            global_step += 1
+        losses["train"].append(jnp.mean(jnp.array(train_batch_losses)).item())
+
+        # Val epoch
+        val_batch_losses = []
+        for batch in zip(
+            *get_batches(val_data, val_batch_size, traj_size + NUM_BURN_IN_STEPS),
+            strict=True,
+        ):
+            key, subkey = jax.random.split(key)
+            loss_i = jitted_batched_trajectory_loss(params, static, subkey, 0.0, *batch)
+            val_batch_losses.append(loss_i)
+        losses["val"].append(jnp.mean(jnp.array(val_batch_losses)).item())
+
+        loop.set_postfix({k: v[-1] for k, v in losses.items()})
+        if losses["val"][-1] == min(losses["val"]):
+            best_params = params
+
+        elif count_fruitless(losses["val"]) > max_patience:
+            loop.set_postfix_str(f"{loop.postfix} (Max patience reached)")
+            break
+
+    params = best_params if return_best else params
+    model = eqx.combine(params, static)
+    return model, losses
+
+def old_world_training_loop(
     key: jtp.Key[jtp.Array, ""],
     datadict: dict,
     world_model: FlowDynamics,
