@@ -36,7 +36,7 @@ class ConditionalMVN(AbstractDistribution):
         depth: int = 2,
     ) -> None:
         self.shape = (dim,)
-        self.cond_shape: tuple[int, ...] = (cond_dim,)  # type: ignore
+        self.cond_shape: tuple[int, ...] = (cond_dim,)
         self.dim = dim
 
         n_offdiag = dim * (dim - 1) // 2
@@ -92,6 +92,117 @@ class ConditionalMVN(AbstractDistribution):
         loc, L = self._loc_and_chol(condition)
         z = jax.random.normal(key, (self.dim,))
         return loc + L @ z
+
+
+class mLSTMCell(eqx.Module):
+    q_proj: eqx.nn.Linear
+    k_proj: eqx.nn.Linear
+    v_proj: eqx.nn.Linear
+    i_gate: eqx.nn.Linear
+    f_gate: eqx.nn.Linear
+    o_gate: eqx.nn.Linear
+    out_norm: eqx.nn.GroupNorm
+    num_heads: int = eqx.field(static=True)
+    head_dim: int = eqx.field(static=True)
+
+    def __init__(self, num_heads: int, head_dim: int, *, key: jtp.Key[jtp.Array, ""]):
+        d_model = num_heads * head_dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+        keys = jax.random.split(key, 6)
+        self.q_proj = eqx.nn.Linear(d_model, d_model, use_bias=False, key=keys[0])
+        self.k_proj = eqx.nn.Linear(d_model, d_model, use_bias=False, key=keys[1])
+        self.v_proj = eqx.nn.Linear(d_model, d_model, use_bias=False, key=keys[2])
+
+        # Input and forget gates produce one scalar gate per head
+        self.i_gate = eqx.nn.Linear(d_model, num_heads, key=keys[3])
+        self.f_gate = eqx.nn.Linear(d_model, num_heads, key=keys[4])
+        self.o_gate = eqx.nn.Linear(d_model, d_model, key=keys[5])
+
+        # Per-head normalization as specified in the xLSTM paper
+        self.out_norm = eqx.nn.GroupNorm(groups=num_heads, channels=d_model)
+
+    def __call__(self, x: jtp.Float[jtp.Array, "seq d_model"]) -> jtp.Float[jtp.Array, "seq d_model"]:
+        """Parallel forward pass over a single sequence (use jax.vmap for batches)."""
+        T, D = x.shape
+        H, dh = self.num_heads, self.head_dim
+
+        # 1. Project queries, keys, values -> shape: (H, T, dh)
+        q = jax.vmap(self.q_proj)(x).reshape(T, H, dh).transpose(1, 0, 2)
+        k = jax.vmap(self.k_proj)(x).reshape(T, H, dh).transpose(1, 0, 2) / jnp.sqrt(dh)
+        v = jax.vmap(self.v_proj)(x).reshape(T, H, dh).transpose(1, 0, 2)
+
+        # 2. Pre-activation gates -> shape: (H, T)
+        i_tilde = jax.vmap(self.i_gate)(x).T
+        f_tilde = jax.vmap(self.f_gate)(x).T
+        o = jax.nn.sigmoid(jax.vmap(self.o_gate)(x))  # (T, D)
+
+        # 3. Log-space stabilization for exponential gates (prevents exp overflow)
+        log_f = jax.nn.log_sigmoid(f_tilde)  # (H, T)
+        causal_mask = jnp.tril(jnp.ones((T, T), dtype=bool))
+
+        # Cumulative log forget gates: sum_{k=j+1}^t log(f_k)
+        cum_log_f = jnp.cumsum(log_f, axis=-1)  # (H, T)
+        log_f_matrix = cum_log_f[:, :, None] - cum_log_f[:, None, :]  # (H, T, T)
+        log_f_matrix = jnp.where(causal_mask[None, :, :], log_f_matrix, -jnp.inf)
+
+        # Combine with input gate: log(D_{t,j}) = log(i_j) + sum_{k=j+1}^t log(f_k)
+        log_D = log_f_matrix + i_tilde[:, None, :]  # (H, T, T)
+
+        # Stabilize by subtracting max log-weight per timestep t
+        m = jnp.max(log_D, axis=-1, keepdims=True)  # (H, T, 1)
+        D_tilde = jnp.exp(log_D - m)  # (H, T, T)
+
+        # 4. Parallel mLSTM attention-style readout
+        qk = jnp.einsum("htd,hjd->htj", q, k)  # (H, T, T)
+        C = qk * D_tilde  # (H, T, T)
+
+        # Normalizer state n_t with max-stabilized threshold
+        n = jnp.abs(jnp.sum(C, axis=-1, keepdims=True))  # (H, T, 1)
+        denom = jnp.maximum(n, jnp.exp(-m)) + 1e-6
+
+        h = jnp.einsum("htj,hjd->htd", C / denom, v)  # (H, T, dh)
+
+        # 5. Reshape, apply per-head GroupNorm, and multiply by output gate
+        h = h.transpose(1, 0, 2).reshape(T, D)
+        h_norm = jax.vmap(self.out_norm)(h)
+        return o * h_norm
+
+    def step(
+        self,
+        x_t: jtp.Float[jtp.Array, " d_model"],
+        state: tuple[jtp.Float[jtp.Array, " H dh dh"], jtp.Float[jtp.Array, " H dh"], jtp.Float[jtp.Array, " H"]],
+    ) -> tuple[jtp.Array, tuple[jtp.Array,jtp.Array,jtp.Array]]:
+        """O(1) recurrent step for autoregressive inference."""
+        C_prev, n_prev, m_prev = state
+        H, dh = self.num_heads, self.head_dim
+
+        q_t = self.q_proj(x_t).reshape(H, dh)
+        k_t = self.k_proj(x_t).reshape(H, dh) / jnp.sqrt(dh)
+        v_t = self.v_proj(x_t).reshape(H, dh)
+
+        i_tilde = self.i_gate(x_t)  # (H,)
+        f_tilde = self.f_gate(x_t)  # (H,)
+        o_t = jax.nn.sigmoid(self.o_gate(x_t))  # (D,)
+
+        # Log-domain stabilizer update
+        log_f = jax.nn.log_sigmoid(f_tilde)
+        m_t = jnp.maximum(log_f + m_prev, i_tilde)
+        f_t = jnp.exp(log_f + m_prev - m_t)
+        i_t = jnp.exp(i_tilde - m_t)
+
+        # Update matrix memory C_t and normalizer vector n_t
+        C_t = f_t[:, None, None] * C_prev + i_t[:, None, None] * jnp.einsum("hd,he->hde", v_t, k_t)
+        n_t = f_t[:, None] * n_prev + i_t[:, None] * k_t
+
+        # Readout
+        num = jnp.einsum("hde,he->hd", C_t, q_t)
+        denom = jnp.maximum(jnp.abs(jnp.sum(n_t * q_t, axis=-1, keepdims=True)), jnp.exp(-m_t)[:, None]) + 1e-6
+        h_t = (num / denom).reshape(-1)
+
+        out = o_t * self.out_norm(h_t)
+        return out, (C_t, n_t, m_t)
 
 
 class FlowDynamics(eqx.Module):
