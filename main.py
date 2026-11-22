@@ -1,236 +1,179 @@
-from pathlib import Path
-
+import dm_env
 import equinox as eqx
-import gymnasium as gym
+import flashbax as fbx
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from jax_mc_pilco.model_learning.flow_model import FlowDynamics
-from jax_mc_pilco.training.learning import world_training_loop
-
-
-def load_acrobot_trajectories(
-    data_path: str | Path,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """
-    Loads Acrobot image trajectories from disk (.npz).
-    Expected arrays:
-      - images: (num_episodes, seq_len + 1, H, W, C) or (num_episodes, seq_len + 1, C, H, W)
-      - actions: (num_episodes, seq_len, action_dim) or (num_episodes, seq_len)
-    Returns:
-      obs_t:      (num_episodes, seq_len, C, H, W) float32 in [0, 1]
-      actions:    (num_episodes, seq_len, action_dim) float32
-      obs_next:   (num_episodes, seq_len, C, H, W) float32 in [0, 1]
-    """
-    data = np.load(data_path)
-    images = data["images"].astype(np.float32)
-    if images.max() > 1.0:
-        images /= 255.0
-
-    # Ensure channel-first (N, T, C, H, W) for Equinox Conv layers
-    if images.shape[-1] in (1, 3):
-        images = np.transpose(images, (0, 1, 4, 2, 3))
-
-    actions = data["actions"].astype(np.float32)
-    if actions.ndim == 2:
-        # One-hot encode discrete Acrobot actions {0, 1, 2} -> (N, T, 3)
-        actions = np.eye(3, dtype=np.float32)[actions.astype(np.int32)]
-
-    obs_t = jnp.asarray(images[:, :-1])
-    obs_next = jnp.asarray(images[:, 1:])
-    actions = jnp.asarray(actions[:, : obs_t.shape[1]])
-    return obs_t, actions, obs_next
+from dm_control import suite
+from dm_control.suite.wrappers import pixels
 
 
-def encode_episodes(
-    world_model: FlowDynamics,
-    images: jax.Array,
-) -> jax.Array:
-    """Encodes image episodes (N, T, C, H, W) into flattened latent states (N, T, D)."""
-    encode_step = lambda img: world_model.encoder(img).reshape(-1)
-    encode_ep = jax.vmap(encode_step)
-    return jax.vmap(encode_ep)(images)
+class Actor(eqx.Module):
+    """Simple Equinox CNN policy to generate continuous actions from pixels."""
+    conv1: eqx.nn.Conv2d
+    conv2: eqx.nn.Conv2d
+    fc: eqx.nn.Linear
+
+    def __init__(self, action_dim: int, key: jax.Array):
+        k1, k2, k3 = jax.random.split(key, 3)
+        # Expects (C, H, W) format for Equinox Conv2d
+        self.conv1 = eqx.nn.Conv2d(in_channels=3, out_channels=16, kernel_size=4, stride=2, key=k1)
+        self.conv2 = eqx.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2, key=k2)
+        # For 64x64 input -> conv1 (31x31) -> conv2 (14x14) -> 32 * 14 * 14 = 6272
+        self.fc = eqx.nn.Linear(in_features=6272, out_features=action_dim, key=k3)
+
+    def __call__(self, obs: jax.Array) -> jax.Array:
+        # Normalize uint8 pixels [0, 255] -> float32 [0, 1] and transpose (H, W, C) -> (C, H, W)
+        x = jnp.transpose(obs.astype(jnp.float32) / 255.0, (2, 0, 1))
+        x = jax.nn.relu(self.conv1(x))
+        x = jax.nn.relu(self.conv2(x))
+        x = jnp.ravel(x)
+        return jnp.tanh(self.fc(x))  # Continuous actions in [-1, 1]
 
 
-def compute_intrinsic_motivation(
-    world_model: FlowDynamics,
-    states: jax.Array,
-    actions: jax.Array,
-    next_states: jax.Array,
-) -> tuple[jax.Array, jax.Array]:
-    """
-    Computes per-step and per-episode intrinsic motivation (novelty/surprise)
-    using negative log-likelihood under FlowDynamics: -log p(s_{t+1} | s_t, a_t, h_t).
-    """
-    hidden_dim = world_model.memory.hidden_size
-
-    def rollout_episode(
-        ep_states: jax.Array,
-        ep_actions: jax.Array,
-        ep_next_states: jax.Array,
-    ) -> jax.Array:
-        def step_fn(hidden: jax.Array, transition: tuple[jax.Array, jax.Array, jax.Array]):
-            s_t, a_t, s_next = transition
-            next_hidden = world_model.step_hidden(s_t, a_t, hidden)
-            # Lower log_prob => higher surprise => higher intrinsic reward
-            lp = world_model.log_prob(s_t, s_next, next_hidden)
-            intrinsic_reward = -lp
-            return next_hidden, intrinsic_reward
-
-        init_hidden = jnp.zeros((hidden_dim,), dtype=ep_states.dtype)
-        _, step_rewards = jax.lax.scan(
-            step_fn, init_hidden, (ep_states, ep_actions, ep_next_states)
-        )
-        return step_rewards
-
-    step_intrinsic_rewards = jax.vmap(rollout_episode)(states, actions, next_states)
-    episode_scores = jnp.mean(step_intrinsic_rewards, axis=-1)
-    return step_intrinsic_rewards, episode_scores
+def make_env(img_height: int = 64, img_width: int = 64) -> dm_env.Environment:
+    """Creates the dm_control acrobot environment wrapped to output pixel observations."""
+    env = suite.load(domain_name="acrobot", task_name="swingup")
+    env = pixels.Wrapper(
+        env,
+        pixels_only=True,
+        render_kwargs={"height": img_height, "width": img_width, "camera_id": 0},
+    )
+    return env
 
 
-def collect_curiosity_guided_acrobot_data(
-    key: jax.Array,
-    world_model: FlowDynamics,
-    num_episodes: int = 16,
-    seq_len: int = 120,
-    num_candidates: int = 5,
-    img_size: tuple[int, int] = (64, 64),
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """
-    Collects new Acrobot image episodes by evaluating candidate actions with the
-    world model and picking actions that maximize expected surprise (-log_prob).
-    """
-    env = gym.make("Acrobot-v1", render_mode="rgb_array")
-    hidden_dim = world_model.memory.hidden_size
+def collect_trajectories(
+    env: dm_env.Environment,
+    actor: Actor,
+    num_samples: int,
+    num_steps: int,
+    img_shape: tuple[int, int, int],
+    action_dim: int,
+) -> dict[str, jax.Array]:
+    """Rolls out `num_samples` trajectories of length `num_steps` in dm_control."""
+    obs_buf = np.zeros((num_samples, num_steps, *img_shape), dtype=np.uint8)
+    act_buf = np.zeros((num_samples, num_steps, action_dim), dtype=np.float32)
+    rew_buf = np.zeros((num_samples, num_steps), dtype=np.float32)
+    done_buf = np.zeros((num_samples, num_steps), dtype=np.bool_)
 
-    all_obs_t, all_actions, all_obs_next = [], [], []
+    # JIT-compile the Equinox forward pass for fast step inference
+    @eqx.filter_jit
+    def select_action(model: Actor, obs: jax.Array) -> jax.Array:
+        return model(obs)
 
-    for _ in range(num_episodes):
-        obs, _ = env.reset()
-        frame = env.render()
-        frame = jax.image.resize(frame, (*img_size, 3), method="bilinear") / 255.0
-        curr_img = jnp.transpose(frame, (2, 0, 1))  # (C, H, W)
-        hidden = jnp.zeros((hidden_dim,))
 
-        ep_obs, ep_act, ep_next = [], [], []
+    for i in range(num_samples):
+        time_step = env.reset()
+        for t in range(num_steps):
+            pixels_obs = time_step.observation["pixels"]
 
-        for _ in range(seq_len):
-            curr_latent = world_model.encoder(curr_img).reshape(-1)
+            # Get action from Equinox actor
+            action = np.asarray(select_action(actor, jnp.asarray(pixels_obs)))
 
-            # Score all 3 discrete Acrobot actions by predicted novelty (-log_prob)
-            best_action = 0
-            best_novelty = -jnp.inf
-            for act_idx in range(3):
-                act_vec = jax.nn.one_hot(act_idx, 3)
-                key, subkey = jax.random.split(key)
-                pred_next, cand_hidden = world_model.predict_next_state_and_hidden(
-                    subkey, curr_latent, act_vec, hidden
-                )
-                novelty = -world_model.log_prob(curr_latent, pred_next, cand_hidden)
-                if novelty > best_novelty:
-                    best_novelty = novelty
-                    best_action = act_idx
+            # Step environment
+            next_time_step = env.step(action)
 
-            # Step real environment with highest-curiosity action
-            _, _, terminated, truncated, _ = env.step(best_action)
-            next_frame = env.render()
-            next_frame = jax.image.resize(next_frame, (*img_size, 3), method="bilinear") / 255.0
-            next_img = jnp.transpose(next_frame, (2, 0, 1))
+            obs_buf[i, t] = pixels_obs
+            act_buf[i, t] = action
+            rew_buf[i, t] = next_time_step.reward or 0.0
+            done_buf[i, t] = next_time_step.last()
 
-            act_vec = jax.nn.one_hot(best_action, 3)
-            hidden = world_model.step_hidden(curr_latent, act_vec, hidden)
+            time_step = next_time_step
+            if time_step.last():
+                time_step = env.reset()
 
-            ep_obs.append(curr_img)
-            ep_act.append(act_vec)
-            ep_next.append(next_img)
-
-            curr_img = next_img
-            if terminated or truncated:
-                obs, _ = env.reset()
-
-        all_obs_t.append(jnp.stack(ep_obs))
-        all_actions.append(jnp.stack(ep_act))
-        all_obs_next.append(jnp.stack(ep_next))
-
-    env.close()
-    return jnp.stack(all_obs_t), jnp.stack(all_actions), jnp.stack(all_obs_next)
+    # Convert collected NumPy trajectories to JAX arrays on device
+    return {
+        "obs": jnp.asarray(obs_buf),
+        "action": jnp.asarray(act_buf),
+        "reward": jnp.asarray(rew_buf),
+        "done": jnp.asarray(done_buf),
+    }
 
 
 def main() -> None:
-    key = jax.random.key(0)
+    # Hyperparameters
+    num_samples = 16       # Number of trajectories to collect
+    num_steps = 100        # Length of each trajectory
+    img_size = (64, 64)    # Rendered image resolution
+    sample_seq_len = 20    # Sequence length when sampling from buffer
+    sample_batch_size = 8  # Batch size when sampling from buffer
 
-    # 1. Load initial Acrobot image trajectories
-    obs_t, actions, obs_next = load_acrobot_trajectories("data/acrobot_trajectories.npz")
-    action_dim = actions.shape[-1]  # 3 for one-hot Acrobot actions
+    key = jax.random.PRNGKey(42)
+    key, actor_key, sample_key = jax.random.split(key, 3)
 
-    # Note: Encoder outputs (latent_channels, 4, 4) -> flattened dim = 16 * latent_channels
-    latent_channels = 8
-    flat_latent_dim = 16 * latent_channels
+    # 1. Initialize Environment & Equinox Policy
+    env = make_env(img_height=img_size[0], img_width=img_size[1])
+    action_spec = env.action_spec()
+    action_dim = action_spec.shape[0]
+    img_shape = (*img_size, 3)
 
-    key, model_key = jax.random.split(key)
-    world_model = FlowDynamics(
-        key=model_key,
-        latent_state_dim=latent_channels,
-        action_dim=action_dim,
-        state_low=jnp.full((flat_latent_dim,), -10.0),
-        state_high=jnp.full((flat_latent_dim,), 10.0),
-        hidden_dim=128,
-        flow_layers=4,
-        in_channels=obs_t.shape[2],
-        num_spatial_layers=4,
+    actor = Actor(action_dim=action_dim, key=actor_key)
+
+    # 2. Initialize Flashbax Trajectory Buffer
+    buffer = fbx.make_trajectory_buffer(
+        max_length_time_axis=num_steps * 2,
+        min_length_time_axis=sample_seq_len,
+        sample_batch_size=sample_batch_size,
+        add_batch_size=num_samples,
+        sample_sequence_length=sample_seq_len,
+        period=1,
     )
 
-    # 2. Iterative active world-model training loop
-    num_active_rounds = 3
-    for round_idx in range(num_active_rounds):
-        print(f"\n--- Active Training Round {round_idx + 1}/{num_active_rounds} ---")
+    # Create a dummy single-timestep structure to initialize buffer state
+    dummy_timestep = {
+        "obs": jnp.zeros(img_shape, dtype=jnp.uint8),
+        "action": jnp.zeros((action_dim,), dtype=jnp.float32),
+        "reward": jnp.array(0.0, dtype=jnp.float32),
+        "done": jnp.array(False, dtype=jnp.bool_),
+    }
+    buffer_state = buffer.init(dummy_timestep)
 
-        # Encode images to latent states if batched_wm_trajectory_loss expects latent vectors.
-        # (If rollout.py encodes images internally, pass obs_t and obs_next directly instead.)
-        states = encode_episodes(world_model, obs_t)
-        next_states = encode_episodes(world_model, obs_next)
+    # 3. Collect pixel trajectories from dm_control acrobot
+    print(f"Collecting {num_samples} trajectories of {num_steps} steps...")
+    trajectories = collect_trajectories(
+        env=env,
+        actor=actor,
+        num_samples=num_samples,
+        num_steps=num_steps,
+        img_shape=img_shape,
+        action_dim=action_dim,
+    )
 
-        key, train_key = jax.random.split(key)
-        world_model, losses = world_training_loop(
-            key=train_key,
-            states=states,
-            actions=actions,
-            next_states=next_states,
-            world_model=world_model,
-            batch_size=32,
-            val_batch_size=8,
-            traj_size=min(100, states.shape[1] - 10),
-            max_epochs=200,
-            learning_rate=3e-4,
-        )
+    # 4. Add trajectories to Flashbax buffer (JIT-compiled)
+    add_fn = jax.jit(buffer.add)
+    buffer_state = add_fn(buffer_state, trajectories)
+    print("Trajectories added to Flashbax buffer successfully.")
 
-        # 3. Compute intrinsic motivation (-log_prob) on current dataset
-        step_rewards, ep_scores = compute_intrinsic_motivation(
-            world_model, states, actions, next_states
-        )
-        print(
-            f"Mean intrinsic surprise (-log_prob): {float(jnp.mean(ep_scores)):.4f} | "
-            f"Max episode surprise: {float(jnp.max(ep_scores)):.4f}"
-        )
+    # 5. Verify by sampling a batch of sub-trajectories
+    sample_fn = jax.jit(buffer.sample)
+    batch = sample_fn(buffer_state, sample_key)
 
-        # 4. Use the trained flow's log_prob to gather high-novelty trajectories for the next round
-        if round_idx < num_active_rounds - 1:
-            key, collect_key = jax.random.split(key)
-            new_obs_t, new_actions, new_obs_next = collect_curiosity_guided_acrobot_data(
-                key=collect_key,
-                world_model=world_model,
-                num_episodes=16,
-                seq_len=obs_t.shape[1],
-            )
-            obs_t = jnp.concatenate([obs_t, new_obs_t], axis=0)
-            actions = jnp.concatenate([actions, new_actions], axis=0)
-            obs_next = jnp.concatenate([obs_next, new_obs_next], axis=0)
+    print("\nSampled Batch Shapes (batch_size, sequence_length, ...):")
+    for k, v in batch.experience.items():
+        print(f"  {k}: {v.shape} ({v.dtype})")
+    
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    # Save trained world model weights
-    eqx.tree_serialise_leaves("acrobot_flow_dynamics.eqx", world_model)
-    print("Saved trained FlowDynamics model to acrobot_flow_dynamics.eqx")
+    # Grab the first sampled trajectory: shape (sequence_length, 64, 64, 3)
+    seq = np.asarray(batch.experience["obs"][0])
+    num_frames = min(8, seq.shape[0])  # Plot up to 8 frames
+
+    fig, axes = plt.subplots(1, num_frames, figsize=(2 * num_frames, 2.5))
+    for t in range(num_frames):
+        axes[t].imshow(seq[t])
+        axes[t].axis("off")
+        axes[t].set_title(f"t={t}")
+
+    plt.tight_layout()
+    plt.show()
+
+    return None
 
 
 if __name__ == "__main__":
     main()
+
+

@@ -23,6 +23,7 @@ dependencies = [
     "dm-control>=1.0.37",
     "dm-tree>=0.1.8",
     "equinox>=0.11.10",
+    "flashbax>=0.1.3",
     "flowjax>=9.0.0",
     "gpjax>=0.6.9",
     "gymnasium[all,box2d,classic-control]>=1.1.1",
