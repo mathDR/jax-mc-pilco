@@ -222,7 +222,7 @@ def batched_act_trajectory_loss(
 ) -> jtp.Float[jtp.Array, ""]:
     """Batched latent behavior-cloning loss across Flashbax trajectory chunks."""
     norm_obs = obs.astype(jnp.float32) / 255.0 - 0.5
-    episode_keys = jax.random.split(key, norm_obs.shape)
+    episode_keys = jax.random.split(key, norm_obs.shape[0])
 
     losses = eqx.filter_vmap(
         single_act_trajectory_loss,
@@ -357,7 +357,12 @@ def batched_imagination_trajectory(
 ]:
     """Generate a batch of imagined latent trajectories from pixel burn-in windows."""
     episode_keys = jax.random.split(key, obs.shape)
-    return eqx.filter_vmap(
+    ret_tuple: tuple[
+        jtp.Float[jtp.Array, "num_episodes horizon_plus_1 latent_dim"],
+        jtp.Float[jtp.Array, "num_episodes horizon action_dim"],
+        jtp.Float[jtp.Array, "num_episodes horizon_plus_1 hidden_dim"],
+        jtp.Float[jtp.Array, "num_episodes horizon"],
+    ] = eqx.filter_vmap(
         imagination_trajectory,
         in_axes=(None, None, None, 0, None, 0, 0, 0),
     )(
@@ -370,6 +375,7 @@ def batched_imagination_trajectory(
         actions,
         dones,
     )
+    return ret_tuple
 
 
 @jtp.jaxtyped(typechecker=beartype)
