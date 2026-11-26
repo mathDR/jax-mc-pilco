@@ -78,6 +78,8 @@ check_untyped_defs = true
 warn_return_any = true
 warn_unused_ignores = true
 show_error_codes = true
+mypy_path = "src"
+explicit_package_bases = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -153,6 +155,8 @@ module = [
     "gpjax.*",
     "jax.*",
     "optax.*",
+    "flashbax.*",
+    "dm_control.*",
 ]
 ignore_missing_imports = true
 # This stops mypy from tracking unimported Any's leaking out from these specific libraries

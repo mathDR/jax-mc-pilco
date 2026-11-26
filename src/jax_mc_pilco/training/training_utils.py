@@ -65,9 +65,10 @@ def _add_batch(arr: jtp.Array, batch_size: int) -> jtp.Array:
     """Adds a leading dimension for batches, dropping the last batch if truncated."""
     batch_size = min(batch_size, arr.shape[0])
     n_batches = arr.shape[0] // batch_size
-    return jax.device_put(
+    ret_array: jax.Array = jax.device_put(
         arr[: n_batches * batch_size].reshape(n_batches, batch_size, *arr.shape[1:]), jax.devices("gpu")[0]
     )
+    return ret_array
 
 
 def count_fruitless(losses: list[float]) -> int:
@@ -78,4 +79,5 @@ def count_fruitless(losses: list[float]) -> int:
 
     """
     min_idx = jnp.argmin(jnp.array(losses)).item()
-    return len(losses) - min_idx - 1
+    ret_int: int = len(losses) - min_idx - 1
+    return ret_int

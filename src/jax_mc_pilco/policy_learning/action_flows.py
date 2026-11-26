@@ -76,7 +76,8 @@ class ActionFlow(eqx.Module):
 
     @jtp.jaxtyped(typechecker=beartype)
     def normalize_state(self, state: jax.Array) -> jax.Array:
-        return (state - paramax.unwrap(self.state_mean)) / paramax.unwrap(self.state_std)
+        ret_array: jax.Array = (state - paramax.unwrap(self.state_mean)) / paramax.unwrap(self.state_std)
+        return ret_array
 
     @jtp.jaxtyped(typechecker=beartype)
     def _build_context(self, state: jax.Array, hidden: jax.Array) -> jax.Array:
@@ -150,7 +151,7 @@ class Critic(eqx.Module):
 
         # Zero-initialize output layer (DreamerV3 convention) so initial V(s, h) ≈ 0
         out_layer = eqx.nn.Linear(mlp_hidden_dim, 1, key=k3)
-        assert out_layer.bias is not None
+        assert out_layer.bias is not None  # noqa: S101
 
         out_layer = eqx.tree_at(
             lambda layer: (layer.weight, layer.bias),

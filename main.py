@@ -6,7 +6,11 @@ from flashbax.vault import Vault
 from jax_mc_pilco.model_learning.flow_model import LatentFlowWorldModel
 from jax_mc_pilco.policy_learning.action_flows import ActionFlow, Critic
 from jax_mc_pilco.simulators.collect_data import collect_data, load_buffer_from_vault
-from jax_mc_pilco.training.learning import imagination_training_loop, policy_training_loop, world_training_loop
+from jax_mc_pilco.training.learning import (
+    imagination_training_loop,
+    policy_training_loop,
+    world_training_loop,
+)
 
 
 def main() -> None:
@@ -112,7 +116,7 @@ def main() -> None:
     # 6. Train the Latent Pixel World Model (Encoder + Posterior + Flow Prior + Decoder + Reward)
     if train_wm_model:
         key, subkey = jax.random.split(key)
-        dynamics, d_losses = world_training_loop(
+        dynamics, _ = world_training_loop(
             subkey,
             (train_buffer, train_buffer_state),
             (val_buffer, val_buffer_state),
@@ -125,7 +129,7 @@ def main() -> None:
     # 7. Train the Behavior Policy in latent space
     if train_act_model:
         key, subkey = jax.random.split(key)
-        policy, p_losses = policy_training_loop(
+        policy, _ = policy_training_loop(
             subkey,
             (train_buffer, train_buffer_state),
             (val_buffer, val_buffer_state),
@@ -137,7 +141,7 @@ def main() -> None:
         policy = eqx.tree_deserialise_leaves("action_model.eqx", action_flow_baseline)
     # 8. Jointly refine Actor and Critic via latent imagination rollouts
     key, subkey = jax.random.split(key)
-    trained_actor, trained_critic, history = imagination_training_loop(
+    trained_actor, trained_critic, _ = imagination_training_loop(
         subkey,
         (train_buffer, train_buffer_state),
         (val_buffer, val_buffer_state),

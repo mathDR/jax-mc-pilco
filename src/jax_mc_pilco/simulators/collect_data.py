@@ -5,15 +5,18 @@ import flashbax as fbx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flashbax.buffers.trajectory_buffer import TrajectoryBuffer, TrajectoryBufferState
 from flashbax.vault import Vault
+from numpy.typing import NDArray
 
+ReplayBuffer = tuple[TrajectoryBuffer, TrajectoryBufferState]
 
 def create_trajectory_buffer(
     num_trajs: int,
     max_traj_len: int,
     batch_size: int,
     sample_seq_len: int,
-):
+) -> TrajectoryBuffer:
     return fbx.make_trajectory_buffer(
         max_length_time_axis=max_traj_len,
         min_length_time_axis=sample_seq_len,
@@ -31,7 +34,7 @@ def load_buffer_from_vault(
     sample_seq_len: int,
     rel_dir: str = "vaults",
     percentiles: tuple[int, int] = (0, 100),
-):
+) -> tuple[TrajectoryBuffer, TrajectoryBufferState]:
     # Load the saved buffer state (or a temporal slice via percentiles, e.g., (0, 90) for train, (90, 100) for val)
     vault = Vault(
         vault_name=vault_name,
@@ -57,12 +60,13 @@ def _extract_obs(
     use_pixels: bool,
     img_size: int = 64,
     camera_id: int = 0,
-) -> np.ndarray:
+) -> NDArray:
     """Extract either channel-first uint8 pixels (C, H, W) or a flat state vector."""
     if use_pixels:
         # dm_control renders (H, W, C) uint8; transpose to (C, H, W) for Equinox Conv2d
         rgb = env.physics.render(height=img_size, width=img_size, camera_id=camera_id)
-        return np.moveaxis(rgb, -1, 0).astype(np.uint8)
+        ret_array: np.ndarray = np.moveaxis(rgb, -1, 0).astype(np.uint8)
+        return ret_array
 
     # Flatten OrderedDict observations (e.g., orientations, velocity) into 1D float32
     obs_parts = [np.ravel(np.asarray(v, dtype=np.float32)) for v in timestep.observation.values()]
@@ -74,9 +78,9 @@ def collect_data(
     num_trajectories: int,
     traj_length: int,
     key: jax.Array,
-    replay_buffer: tuple[Any, Any] | None = None,
+    replay_buffer: ReplayBuffer | None = None,
     *,
-    policy_fn: Callable[[jax.Array, np.ndarray], np.ndarray] | None = None,
+    policy_fn: Callable[[jax.Array, NDArray[Any]], NDArray[Any]] | None = None,
     use_pixels: bool = False,
     img_size: int = 64,
     camera_id: int = 0,
@@ -84,7 +88,7 @@ def collect_data(
     sample_batch_size: int = 64,
     sample_seq_len: int = 26,
     max_buffer_time_axis: int | None = None,
-) -> tuple[Any, Any]:
+) -> ReplayBuffer:
     """Collect `num_trajectories` of length `traj_length` from a `dm_control` env
     and add them to a Flashbax trajectory buffer.
 
