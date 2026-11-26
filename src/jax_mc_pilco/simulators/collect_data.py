@@ -1,183 +1,187 @@
-"""Methods to generate data."""
+from collections.abc import Callable
+from typing import Any
 
-import gymnasium as gym
+import flashbax as fbx
 import jax
 import jax.numpy as jnp
-import jaxtyping as jtp
 import numpy as np
-from scipy.stats import qmc
-
-from jax_mc_pilco.model_learning.flow_model import FlowDynamics
-from jax_mc_pilco.policy_learning.action_flows import FlowActor
-
-jax.config.update("jax_enable_x64", True)
+from flashbax.vault import Vault
 
 
-def observation_to_qpos_qvel(
-    obs: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extracts qpos and qvel from an 11-element InvertedDoublePendulum observation.
-    """
-    # 1. Reconstruct qpos (3 elements)
-    cart_pos = obs[0]
-    # np.arctan2 maps y (sin) and x (cos) to the range [-pi, pi]
-    pole1_angle = np.arctan2(obs[1], obs[3])
-    pole2_angle = np.arctan2(obs[2], obs[4])
-
-    qpos = np.array([cart_pos, pole1_angle, pole2_angle])
-
-    # 2. Reconstruct qvel (3 elements)
-    qvel = np.array([obs[5], obs[6], obs[7]])
-
-    return qpos, qvel
-
-
-def generate_sobol_initial_states(
-    num_states: int,
-    dimensions: int,
-    l_bounds: np.ndarray,
-    u_bounds: np.ndarray,
-    *,
-    seed: int = 42,
-) -> np.ndarray:
-    """Generates low-discrepancy physical states for InvertedDoublePendulum-v4."""
-    # 1. Dimensions: 1 cart pos, 2 link angles, 1 cart vel, 2 link angular vels = 6 dimensions
-    sampler = qmc.Sobol(d=dimensions, scramble=True, seed=seed)
-    raw_samples = sampler.random(n=num_states)
-
-    physical_states: np.ndarray = qmc.scale(raw_samples, l_bounds, u_bounds)
-    return physical_states
-
-
-def collect_mbrl_transitions(
-    env: gym.Env,
-    num_states: int,
-    actions_per_state: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """
-    Forces the environment into a Sobol state, executes multiple action branches,
-    and returns an MBRL transition dataset.
-    """
-    lb = np.array([-1.0, -0.6, -0.6, 0.8, 0.8, -5.0, -5.0, -5.0, -10.0])
-    ub = np.array([1.0, 0.6, 0.6, 1.0, 1.0, 5.0, 5.0, 5.0, 10.0])
-    sobol_states = generate_sobol_initial_states(num_states, 9, lb, ub)
-
-    # Storage arrays for MBRL training
-    all_observations = []
-    all_actions = []
-    all_next_observations = []
-    all_rewards = []
-
-    # Unwrap to access MuJoCo mechanics directly
-    raw_env = env.unwrapped
-
-    for state in sobol_states:
-        # Extract MuJoCo physics coordinates
-        qpos, qvel = observation_to_qpos_qvel(state)
-        observations = []
-        actions = []
-        next_observations = []
-        rewards = []
-
-        env.reset()
-        raw_env.set_state(qpos, qvel)
-
-        for _ in range(actions_per_state):
-            obs = raw_env._get_obs()
-
-            # C. Sample a random exploratory action
-            action = env.action_space.sample()
-
-            # D. Step the environment forward 1 timestep
-            next_obs, reward, _, _, _ = env.step(action)
-
-            # E. Store transition tuple
-            observations.append(obs)
-            actions.append(action)
-            next_observations.append(next_obs)
-            rewards.append(reward)
-        all_observations.append(jnp.array(observations))
-        all_actions.append(jnp.array(actions))
-        all_next_observations.append(jnp.array(next_observations))
-        all_rewards.append(jnp.array(rewards))
-
-    return (
-        jnp.array(all_observations),
-        jnp.array(all_actions),
-        jnp.array(all_next_observations),
-        jnp.array(all_rewards),
+def create_trajectory_buffer(
+    num_trajs: int,
+    max_traj_len: int,
+    batch_size: int,
+    sample_seq_len: int,
+):
+    return fbx.make_trajectory_buffer(
+        max_length_time_axis=max_traj_len,
+        min_length_time_axis=sample_seq_len,
+        sample_batch_size=batch_size,
+        add_batch_size=num_trajs,
+        sample_sequence_length=sample_seq_len,
+        period=1,
     )
 
 
-def collect_experience(
-    env: gym.Env,
-    num_steps: int,
-    key: jtp.Key[jtp.Array, ""],
-    actor: FlowActor | None = None,
-    world_model: FlowDynamics | None = None,
-    exploration: bool = True,
-    use_sobol: bool = False,
-) -> tuple[jtp.Float, jtp.Int, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Samples data from a Gymnasium environment using standard Python/NumPy,
-    then converts the accumulated trajectory into a JAX array.
+def load_buffer_from_vault(
+    vault_name: str,
+    vault_uid: str,
+    batch_size: int,
+    sample_seq_len: int,
+    rel_dir: str = "vaults",
+    percentiles: tuple[int, int] = (0, 100),
+):
+    # Load the saved buffer state (or a temporal slice via percentiles, e.g., (0, 90) for train, (90, 100) for val)
+    vault = Vault(
+        vault_name=vault_name,
+        rel_dir=rel_dir,
+        vault_uid=vault_uid,
+    )
+    buffer_state = vault.read(percentiles=percentiles)
+
+    # Reconstruct the matching Flashbax buffer functions using the loaded dimensions
+    B, T = buffer_state.experience["obs"].shape[:2]
+    buffer = create_trajectory_buffer(
+        num_trajs=B,
+        max_traj_len=T,
+        batch_size=batch_size,
+        sample_seq_len=sample_seq_len,
+    )
+    return buffer, buffer_state
+
+
+def _extract_obs(
+    env: Any,
+    timestep: Any,
+    use_pixels: bool,
+    img_size: int = 64,
+    camera_id: int = 0,
+) -> np.ndarray:
+    """Extract either channel-first uint8 pixels (C, H, W) or a flat state vector."""
+    if use_pixels:
+        # dm_control renders (H, W, C) uint8; transpose to (C, H, W) for Equinox Conv2d
+        rgb = env.physics.render(height=img_size, width=img_size, camera_id=camera_id)
+        return np.moveaxis(rgb, -1, 0).astype(np.uint8)
+
+    # Flatten OrderedDict observations (e.g., orientations, velocity) into 1D float32
+    obs_parts = [np.ravel(np.asarray(v, dtype=np.float32)) for v in timestep.observation.values()]
+    return np.concatenate(obs_parts, axis=0)
+
+
+def collect_data(
+    env: Any,
+    num_trajectories: int,
+    traj_length: int,
+    key: jax.Array,
+    replay_buffer: tuple[Any, Any] | None = None,
+    *,
+    policy_fn: Callable[[jax.Array, np.ndarray], np.ndarray] | None = None,
+    use_pixels: bool = False,
+    img_size: int = 64,
+    camera_id: int = 0,
+    action_repeat: int = 1,
+    sample_batch_size: int = 64,
+    sample_seq_len: int = 26,
+    max_buffer_time_axis: int | None = None,
+) -> tuple[Any, Any]:
+    """Collect `num_trajectories` of length `traj_length` from a `dm_control` env
+    and add them to a Flashbax trajectory buffer.
+
+    Args:
+        env: A `dm_control.suite` environment instance.
+        num_trajectories: Number of parallel/batched trajectories (B) to collect.
+        traj_length: Number of steps (T) per trajectory.
+        key: JAX PRNG key for action sampling.
+        replay_buffer: Optional `(buffer, buffer_state)` tuple. If None, creates a new one.
+        policy_fn: Optional callable `(key, obs) -> action` returning an action within
+            `[action_spec.minimum, action_spec.maximum]`. Defaults to uniform random actions.
+        use_pixels: If True, renders `(3, img_size, img_size)` uint8 frames instead of state vectors.
+        img_size: Height/width for pixel rendering when `use_pixels=True`.
+        camera_id: Camera index passed to `env.physics.render`.
+        action_repeat: Number of physics steps per selected action.
+        sample_batch_size: Batch size configured on the Flashbax buffer (used if creating new).
+        sample_seq_len: Sub-sequence length configured on the Flashbax buffer (used if creating new).
+        max_buffer_time_axis: Capacity along the time axis. Defaults to `traj_length * 10`.
+
+    Returns:
+        `(buffer, buffer_state)` with the newly collected trajectories added.
     """
-    max_steps = num_steps if exploration else 1
+    action_spec = env.action_spec()
+    act_low = np.asarray(action_spec.minimum, dtype=np.float32)
+    act_high = np.asarray(action_spec.maximum, dtype=np.float32)
 
-    actions: list = []
-    states: list = []
-    next_states: list = []
-    rewards: list = []
-    max_episode_length = 0
-    total_reward = 0.0
+    # Probe shapes from an initial reset
+    init_ts = env.reset()
+    sample_obs = _extract_obs(env, init_ts, use_pixels, img_size, camera_id)
 
-    if use_sobol and exploration:
-        states, actions, next_states, rewards = collect_mbrl_transitions(
-            env,
-            num_states=2 ** int(jnp.log2(num_steps)),
-            actions_per_state=64,
-        )
-        total_reward = 0.0
-        max_episode_length = 0
-    else:
-        while len(actions) < max_steps:
-            curr_state, _ = env.reset()
+    obs_buf = np.empty((num_trajectories, traj_length, *sample_obs.shape), dtype=sample_obs.dtype)
+    act_buf = np.empty((num_trajectories, traj_length, *action_spec.shape), dtype=np.float32)
+    rew_buf = np.empty((num_trajectories, traj_length), dtype=np.float32)
+    done_buf = np.empty((num_trajectories, traj_length), dtype=bool)
 
-            s_curr_ep = []
-            action_ep = []
-            s_next_ep = []
-            ep_rewards = []
+    for b in range(num_trajectories):
+        ts = env.reset()
+        obs = _extract_obs(env, ts, use_pixels, img_size, camera_id)
 
-            for _ in range(num_steps):
-                key, ak = jax.random.split(key)
-                action = env.action_space.sample() if actor is None else actor.sample_action(ak, jnp.array(curr_state))
-                action_np = np.array(action)
+        for t in range(traj_length):
+            key, act_key = jax.random.split(key)
 
-                next_state, reward, terminated, truncated, _ = env.step(action_np)
-                ep_rewards.append(float(reward))
-                total_reward += float(reward)
+            if policy_fn is None:
+                action = np.asarray(
+                    jax.random.uniform(act_key, shape=action_spec.shape, minval=act_low, maxval=act_high),
+                    dtype=np.float32,
+                )
+            else:
+                action = np.clip(np.asarray(policy_fn(act_key, obs), dtype=np.float32), act_low, act_high)
 
-                s_curr_ep.append(curr_state)
-                action_ep.append(action_np)
-                s_next_ep.append(next_state)
-
-                curr_state = next_state
-                if terminated or truncated:
+            # Step environment with optional action repeat
+            total_reward = 0.0
+            done = False
+            for _ in range(action_repeat):
+                ts = env.step(action)
+                total_reward += float(ts.reward or 0.0)
+                if ts.last():
+                    done = True
                     break
 
-            episode_length = len(action_ep)
-            max_episode_length = max(max_episode_length, episode_length)
+            obs_buf[b, t] = obs
+            act_buf[b, t] = action
+            rew_buf[b, t] = total_reward
+            done_buf[b, t] = done
 
-            rewards.extend(ep_rewards)
-            states.extend(s_curr_ep)
-            next_states.extend(s_next_ep)
-            actions.extend(action_ep)
+            if done:
+                ts = env.reset()
+            obs = _extract_obs(env, ts, use_pixels, img_size, camera_id)
 
-    return (
-        total_reward,
-        max_episode_length,
-        jnp.array(states),
-        jnp.array(actions),
-        jnp.array(next_states),
-        jnp.array(rewards)[:, jnp.newaxis],
-    )
+    # Create the Flashbax trajectory buffer if not provided
+    if replay_buffer is None:
+        max_time = max_buffer_time_axis if max_buffer_time_axis is not None else max(traj_length * 10, sample_seq_len)
+        buffer = fbx.make_trajectory_buffer(
+            max_length_time_axis=max_time,
+            min_length_time_axis=sample_seq_len,
+            sample_batch_size=sample_batch_size,
+            add_batch_size=num_trajectories,
+            sample_sequence_length=sample_seq_len,
+            period=1,
+        )
+        dummy_timestep = {
+            "obs": jnp.zeros(sample_obs.shape, dtype=jnp.dtype(sample_obs.dtype)),
+            "action": jnp.zeros(action_spec.shape, dtype=jnp.float32),
+            "reward": jnp.zeros((), dtype=jnp.float32),
+            "done": jnp.zeros((), dtype=jnp.bool_),
+        }
+        buffer_state = buffer.init(dummy_timestep)
+    else:
+        buffer, buffer_state = replay_buffer
+
+    # Add the (B, T, ...) batch of trajectories into the Flashbax buffer
+    trajectory_batch = {
+        "obs": jnp.asarray(obs_buf),
+        "action": jnp.asarray(act_buf),
+        "reward": jnp.asarray(rew_buf),
+        "done": jnp.asarray(done_buf),
+    }
+    buffer_state = buffer.add(buffer_state, trajectory_batch)
+
+    return buffer, buffer_state

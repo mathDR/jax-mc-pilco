@@ -1,25 +1,20 @@
-import pytest
 import jax
-
+import pytest
 from jaxcfm import OTSampler
-
 
 N_SAMPLES = 100
 # these are chosen to test different numbers of dimensions
-SHAPES = [
-    [N_SAMPLES, *dims] for dims in [[1], [10], [10, 40], [10, 20, 30]]
-]
+SHAPES = [[N_SAMPLES, *dims] for dims in [[1], [10], [10, 40], [10, 20, 30]]]
 X_ARRS = [
     (
         jax.random.normal(jax.random.PRNGKey(123), shape=shape, dtype=float),
-        jax.random.normal(jax.random.PRNGKey(423), shape=shape, dtype=float)
+        jax.random.normal(jax.random.PRNGKey(423), shape=shape, dtype=float),
     )
     for shape in SHAPES
 ]
 
 
 class TestOTSampler:
-
     key = jax.random.PRNGKey(123)
 
     y0 = jax.random.randint(jax.random.PRNGKey(12), [N_SAMPLES], 0, 3)

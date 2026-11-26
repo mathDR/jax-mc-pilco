@@ -4,10 +4,10 @@ import jax
 import jax.numpy as jnp
 import jaxtyping as jtp
 import paramax
+from beartype import beartype
 from flowjax.bijections import Affine, Chain, RationalQuadraticSpline, Sigmoid
 from flowjax.distributions import MultivariateNormal, Transformed
-from flowjax.flows import coupling_flow, masked_autoregressive_flow
-from paramax import non_trainable
+from flowjax.flows import masked_autoregressive_flow
 
 EPSILON = 1e-4
 
@@ -46,16 +46,12 @@ class ActionFlow(eqx.Module):
             state_std = jnp.ones((state_dim,))
 
         self.state_mean = paramax.non_trainable(state_mean)
-        self.state_std = paramax.non_trainable(
-            jnp.where(state_std < 1e-6, 1.0, state_std)
-        )
+        self.state_std = paramax.non_trainable(jnp.where(state_std < 1e-6, 1.0, state_std))
 
         if base_flow is None:
             unbounded_flow = masked_autoregressive_flow(
                 key=key,
-                base_dist=MultivariateNormal(
-                    loc=jnp.zeros(action_dim), covariance=jnp.eye(action_dim)
-                ),
+                base_dist=MultivariateNormal(loc=jnp.zeros(action_dim), covariance=jnp.eye(action_dim)),
                 cond_dim=cond_dim,
                 flow_layers=flow_layers,
                 invert=True,
@@ -67,12 +63,10 @@ class ActionFlow(eqx.Module):
             # Pad bounds by eps so true [-pi/2, pi/2] values stay strictly inside (0, 1)
             padded_low = action_low - eps
             padded_scale = (action_high - action_low) + 2.0 * eps
-            bound_bijection = Chain(
-                [
-                    Sigmoid(shape=(action_dim,)),
-                    Affine(loc=padded_low, scale=padded_scale),
-                ]
-            )
+            bound_bijection = Chain([
+                Sigmoid(shape=(action_dim,)),
+                Affine(loc=padded_low, scale=padded_scale),
+            ])
             base_flow = Transformed(
                 unbounded_flow,
                 paramax.non_trainable(bound_bijection),
@@ -80,16 +74,16 @@ class ActionFlow(eqx.Module):
 
         self.flow = base_flow
 
+    @jtp.jaxtyped(typechecker=beartype)
     def normalize_state(self, state: jax.Array) -> jax.Array:
-        ret_state: jax.Array =  (state - paramax.unwrap(self.state_mean)) / paramax.unwrap(
-            self.state_std
-        )
-        return ret_state
+        return (state - paramax.unwrap(self.state_mean)) / paramax.unwrap(self.state_std)
 
+    @jtp.jaxtyped(typechecker=beartype)
     def _build_context(self, state: jax.Array, hidden: jax.Array) -> jax.Array:
         norm_state = self.normalize_state(state)
         return jnp.concatenate([norm_state, hidden], axis=-1)
 
+    @jtp.jaxtyped(typechecker=beartype)
     def _clip_action(self, raw_sample: jax.Array) -> jax.Array:
         clipped = jnp.clip(
             raw_sample,
@@ -98,6 +92,7 @@ class ActionFlow(eqx.Module):
         )
         return raw_sample + jax.lax.stop_gradient(clipped - raw_sample)
 
+    @jtp.jaxtyped(typechecker=beartype)
     def sample(
         self,
         key: jtp.Key[jtp.Array, ""],
@@ -109,6 +104,7 @@ class ActionFlow(eqx.Module):
         raw_sample = self.flow.sample(key, (), context)
         return self._clip_action(raw_sample)
 
+    @jtp.jaxtyped(typechecker=beartype)
     def sample_and_log_prob(
         self,
         key: jtp.Key[jtp.Array, ""],
@@ -121,6 +117,7 @@ class ActionFlow(eqx.Module):
         action = self._clip_action(raw_sample)
         return action, log_prob
 
+    @jtp.jaxtyped(typechecker=beartype)
     def log_prob(
         self,
         action: jax.Array,
@@ -129,68 +126,53 @@ class ActionFlow(eqx.Module):
     ) -> jax.Array:
         """Return the behavior-model log density of an observed action."""
         context = self._build_context(state, hidden)
-        return self.flow.log_prob(action, context)
+        safe_action = jnp.clip(
+            action,
+            paramax.unwrap(self.action_low),
+            paramax.unwrap(self.action_high),
+        )
+        return self.flow.log_prob(safe_action, context)
 
-class FlowActor(eqx.Module):
-    """
-    Conditional Normalizing Flow policy.
-    Maps noise z ~ N(0, I) -> Action given the state s_t
-    """
 
-    flow: Transformed
-    action_low: jax.Array
-    action_high: jax.Array
-    margin: jax.Array
+class Critic(eqx.Module):
+    network: eqx.nn.Sequential
 
     def __init__(
         self,
+        state_dim: int,
+        rnn_hidden_dim: int,
+        mlp_hidden_dim: int = 256,
+        *,
         key: jtp.Key[jtp.Array, ""],
-        cond_dim: int,
-        action_dim: int,
-        action_low: jax.Array,
-        action_high: jax.Array,
-        flow_layers: int = 4,
-    ):
-        self.action_low = jnp.broadcast_to(action_low, (action_dim,))
-        self.action_high = jnp.broadcast_to(action_high, (action_dim,))
+    ) -> None:
+        k1, k2, k3 = jax.random.split(key, 3)
+        in_dim = state_dim + rnn_hidden_dim
 
-        base_dist = MultivariateNormal(
-            loc=jnp.zeros(action_dim),
-            covariance=jnp.eye(action_dim),
-        )
-        base_flow = coupling_flow(
-            key=key,
-            base_dist=base_dist,
-            cond_dim=cond_dim,
-            nn_width=256,
-            nn_depth=2,
-            flow_layers=flow_layers,
+        # Zero-initialize output layer (DreamerV3 convention) so initial V(s, h) ≈ 0
+        out_layer = eqx.nn.Linear(mlp_hidden_dim, 1, key=k3)
+        assert out_layer.bias is not None
+
+        out_layer = eqx.tree_at(
+            lambda layer: (layer.weight, layer.bias),
+            out_layer,
+            (jnp.zeros_like(out_layer.weight), jnp.zeros_like(out_layer.bias)),
         )
 
-        loc = action_low - EPSILON
-        self.margin = 2 * EPSILON * (self.action_high - self.action_low)
-        squash = non_trainable(Chain([Sigmoid(shape=(action_dim,)), Affine(loc=loc, scale=self.margin)]))
-        full_bijection = Chain([base_flow.bijection, squash])
-        self.flow = Transformed(base_dist, full_bijection)
+        self.network = eqx.nn.Sequential((
+            eqx.nn.Linear(in_dim, mlp_hidden_dim, key=k1),
+            eqx.nn.LayerNorm(mlp_hidden_dim),
+            eqx.nn.Lambda(jax.nn.silu),
+            eqx.nn.Linear(mlp_hidden_dim, mlp_hidden_dim, key=k2),
+            eqx.nn.LayerNorm(mlp_hidden_dim),
+            eqx.nn.Lambda(jax.nn.silu),
+            out_layer,
+        ))
 
-    def sample_action(
+    def __call__(
         self,
-        key: jtp.Key[jtp.Array, ""],
-        context: jax.Array,
-    ) -> jax.Array:
-        return self.flow.sample(key, condition=context)
-
-    def sample_action_and_log_prob(
-        self,
-        key: jtp.Key[jtp.Array, ""],
-        context: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
-        action, logp = self.flow.sample_and_log_prob(key, condition=context)
-        return action, logp
-
-    def log_prob(
-        self,
-        action: jax.Array,
-        context: jax.Array,
-    ) -> jax.Array:
-        return self.flow.log_prob(action, condition=context)
+        norm_state: jtp.Float[jtp.Array, " state_dim"],
+        hidden: jtp.Float[jtp.Array, " rnn_hidden_dim"],
+    ) -> jtp.Float[jtp.Array, ""]:
+        context = jnp.concatenate([norm_state, hidden], axis=-1)
+        raw_value = jnp.squeeze(self.network(context), axis=-1)
+        return -jax.nn.softplus(raw_value)  # Strictly <= 0, smooth gradients everywhere
