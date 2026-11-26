@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 ReplayBuffer = tuple[TrajectoryBuffer, TrajectoryBufferState]
 
+
 def create_trajectory_buffer(
     num_trajs: int,
     max_traj_len: int,
