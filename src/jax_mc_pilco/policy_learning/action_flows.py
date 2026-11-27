@@ -64,7 +64,7 @@ class ActionFlow(eqx.Module):
             padded_low = action_low - eps
             padded_scale = (action_high - action_low) + 2.0 * eps
             bound_bijection = Chain([
-                Sigmoid(shape=(action_dim,)), # type: ignore[call-arg]
+                Sigmoid(shape=(action_dim,)),  # type: ignore[call-arg]
                 Affine(loc=padded_low, scale=padded_scale),
             ])
             base_flow = Transformed(

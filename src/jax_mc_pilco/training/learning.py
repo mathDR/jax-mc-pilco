@@ -1,5 +1,6 @@
 """Methods to train Flows and generate data."""
 
+from collections.abc import Callable
 from typing import Any, cast
 
 import equinox as eqx
@@ -33,7 +34,16 @@ def _build_world_step_fns(
     optimizer: optax.GradientTransformation,
     kl_scale: float,
     free_nats: float,
-):
+) -> tuple[
+    Callable[
+        [jtp.PyTree, LatentFlowWorldModel, jtp.Key[jtp.Array, ""], jtp.PyTree],
+        tuple[jtp.PyTree, optax.OptState, jtp.Float[jtp.Array, ""]],
+    ],
+    Callable[
+        [jtp.PyTree, LatentFlowWorldModel, jtp.Key[jtp.Array, ""]],
+        jtp.Float[jtp.Array, ""],
+    ],
+]:
     """Build jitted train and eval step functions for LatentFlowWorldModel."""
 
     def loss_fn(
@@ -119,7 +129,7 @@ def world_training_loop(
     max_patience: int = 25,
     return_best: bool = True,
     show_progress: bool = True,
-) -> tuple[LatentFlowWorldModel, dict[str, list]]:
+) -> tuple[LatentFlowWorldModel, dict[str, list[float]]]:
     """Training loop for LatentFlowWorldModel using Flashbax trajectory buffers."""
     train_buffer, train_buffer_state = train_data
     val_buffer, val_buffer_state = val_data
@@ -146,7 +156,7 @@ def world_training_loop(
         free_nats=free_nats,
     )
 
-    losses: dict[str, list] = {"train": [], "val": []}
+    losses: dict[str, list[float]] = {"train": [], "val": []}
     loop = tqdm.tqdm(range(max_epochs), disable=not show_progress)
 
     for _ in loop:
@@ -181,7 +191,16 @@ def _build_policy_step_fns(
     val_buffer_state: Any,
     act_static: ActionFlow,
     optimizer: optax.GradientTransformation,
-):
+) -> tuple[
+    Callable[
+        [jtp.PyTree, jtp.PyTree, LatentFlowWorldModel, jtp.Key[jtp.Array, ""]],
+        tuple[jtp.PyTree, optax.OptState, jtp.Float[jtp.Array, ""]],
+    ],
+    Callable[
+        [jtp.PyTree, LatentFlowWorldModel, jtp.Key[jtp.Array, ""]],
+        jtp.Float[jtp.Array, ""],
+    ],
+]:
     """Build jitted train and eval step functions for ActionFlow behavior cloning."""
 
     @eqx.filter_jit
@@ -323,7 +342,10 @@ def latent_imagination_trajectory(
     init_hidden = jnp.zeros((world_model.memory.hidden_size,), dtype=embeds.dtype)
     init_z = jnp.zeros((world_model.latent_dim,), dtype=embeds.dtype)
 
-    def burn_in_fn(carry, inputs):
+    def burn_in_fn(
+        carry: tuple[jax.Array, jax.Array, jax.Array, jtp.PRNGKeyArray],
+        inputs: tuple[jax.Array, jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jtp.PRNGKeyArray], None]:
         prev_z, prev_hidden, prev_done, step_key = carry
         embed_t, action_t, done_t = inputs
 
@@ -359,7 +381,13 @@ def latent_imagination_trajectory(
     first_action, first_log_prob = action_flow.sample_and_log_prob(first_action_key, start_z, burn_in_hidden)
 
     # 3. Roll out `horizon` steps in latent space using prior flow
-    def scan_fn(carry, _):
+    def scan_fn(
+        carry: tuple[jax.Array, jax.Array, jax.Array, jtp.PRNGKeyArray],
+        _: None,
+    ) -> tuple[
+        tuple[jax.Array, jax.Array, jax.Array, jtp.PRNGKeyArray],
+        tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+    ]:
         prev_z, prev_action, prev_hidden, step_key = carry
         next_key, state_key, action_key = jax.random.split(step_key, 3)
 
@@ -395,8 +423,8 @@ def _compute_epoch_steps(buffer: Any, buffer_state: Any) -> int:
     sample_shape = jax.eval_shape(buffer.sample, buffer_state, jax.random.key(0))
     batch_size, seq_len = sample_shape.experience["obs"].shape[:2]
 
-    chunks_per_traj = max(1, T // seq_len)
-    return max(1, (B * chunks_per_traj) // batch_size)
+    chunks_per_traj = max(1, int(T) // int(seq_len))
+    return max(1, (int(B) * chunks_per_traj) // int(batch_size))
 
 
 def _aggregate_imagination_metrics(
@@ -431,7 +459,38 @@ def _build_imagination_step_fns(
     lambda_: float,
     entropy_coef: float,
     huber_delta: float,
-):
+) -> tuple[
+    Callable[
+        [
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            LatentFlowWorldModel,
+            jtp.Key[jtp.Array, ""],
+            jax.Array,
+        ],
+        tuple[
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            optax.OptState,
+            dict[str, jax.Array],
+        ],
+    ],
+    Callable[
+        [
+            jtp.PyTree,
+            jtp.PyTree,
+            jtp.PyTree,
+            LatentFlowWorldModel,
+            jtp.Key[jtp.Array, ""],
+        ],
+        dict[str, jax.Array],
+    ],
+]:
     """Build jitted train and eval step functions for latent imagination."""
 
     def loss_fn(
@@ -473,7 +532,15 @@ def _build_imagination_step_fns(
         wm: LatentFlowWorldModel,
         step_key: jtp.Key[jtp.Array, ""],
         update_actor: jax.Array,
-    ):
+    ) -> tuple[
+        jtp.PyTree,
+        jtp.PyTree,
+        jtp.PyTree,
+        jtp.PyTree,
+        optax.OptState,
+        dict[str, jax.Array],
+    ]:
+
         sample_key, loss_key = jax.random.split(step_key)
         exp = train_buffer.sample(train_buffer_state, sample_key).experience
 
