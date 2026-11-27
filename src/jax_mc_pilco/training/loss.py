@@ -356,7 +356,7 @@ def batched_imagination_trajectory(
     jtp.Float[jtp.Array, "num_episodes horizon"],
 ]:
     """Generate a batch of imagined latent trajectories from pixel burn-in windows."""
-    episode_keys = jax.random.split(key, obs.shape)
+    episode_keys = jax.random.split(key, obs.shape[0])
     ret_tuple: tuple[
         jtp.Float[jtp.Array, "num_episodes horizon_plus_1 latent_dim"],
         jtp.Float[jtp.Array, "num_episodes horizon action_dim"],

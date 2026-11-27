@@ -110,11 +110,12 @@ def main() -> None:
         key=critic_key,
     )
 
-    train_wm_model = True
+    train_wm_model = False
     train_act_model = True
 
     # 6. Train the Latent Pixel World Model (Encoder + Posterior + Flow Prior + Decoder + Reward)
     if train_wm_model:
+        print("Training World Model\n")
         key, subkey = jax.random.split(key)
         dynamics, _ = world_training_loop(
             subkey,
@@ -124,10 +125,12 @@ def main() -> None:
         )
         eqx.tree_serialise_leaves("world_model.eqx", dynamics)
     else:
+        print("World Model Trained.  Loading weights.\n")
         dynamics = eqx.tree_deserialise_leaves("world_model.eqx", world_model_baseline)
 
     # 7. Train the Behavior Policy in latent space
     if train_act_model:
+        print("Training Actor Model\n")
         key, subkey = jax.random.split(key)
         policy, _ = policy_training_loop(
             subkey,
@@ -138,6 +141,7 @@ def main() -> None:
         )
         eqx.tree_serialise_leaves("action_model.eqx", policy)
     else:
+        print("Actor Model Trained.  Loading weights.\n")
         policy = eqx.tree_deserialise_leaves("action_model.eqx", action_flow_baseline)
     # 8. Jointly refine Actor and Critic via latent imagination rollouts
     key, subkey = jax.random.split(key)
