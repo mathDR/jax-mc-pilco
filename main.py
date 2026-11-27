@@ -111,7 +111,7 @@ def main() -> None:
     )
 
     train_wm_model = False
-    train_act_model = True
+    train_act_model = False
 
     # 6. Train the Latent Pixel World Model (Encoder + Posterior + Flow Prior + Decoder + Reward)
     if train_wm_model:
@@ -145,6 +145,7 @@ def main() -> None:
         policy = eqx.tree_deserialise_leaves("action_model.eqx", action_flow_baseline)
     # 8. Jointly refine Actor and Critic via latent imagination rollouts
     key, subkey = jax.random.split(key)
+    print("Training Imagination Model\n")
     trained_actor, trained_critic, _ = imagination_training_loop(
         subkey,
         (train_buffer, train_buffer_state),
