@@ -27,6 +27,7 @@ dependencies = [
     "flowjax>=9.0.0",
     "gpjax>=0.6.9",
     "gymnasium[all,box2d,classic-control]>=1.1.1",
+    "imageio[ffmpeg]>=2.37.2",
     "ipython>=8.18.1",
     "jax>=0.4.30",
     "jaxtyping>=0.2.36",

@@ -428,11 +428,11 @@ def _compute_epoch_steps(buffer: Any, buffer_state: Any) -> int:
 
 
 def _aggregate_imagination_metrics(
-    metrics_list: list[dict[str, jax.Array]],
+    epoch_metrics: dict[str, jax.Array],
     prefix: str,
-    history: dict[str, list],
+    history: dict[str, list[float]],
 ) -> None:
-    """Append epoch-averaged step metrics into the history dictionary."""
+    """Append epoch-averaged metrics into the history dictionary."""
     metric_keys = [
         ("actor_loss", "actor"),
         ("critic_loss", "critic"),
@@ -440,8 +440,7 @@ def _aggregate_imagination_metrics(
         ("mean_reward", "reward"),
     ]
     for src_key, dst_suffix in metric_keys:
-        mean_val = jnp.mean(jnp.array([m[src_key] for m in metrics_list])).item()
-        history[f"{prefix}_{dst_suffix}"].append(mean_val)
+        history[f"{prefix}_{dst_suffix}"].append(float(epoch_metrics[src_key].item()))
 
 
 def _build_imagination_step_fns(
@@ -453,6 +452,8 @@ def _build_imagination_step_fns(
     crit_static: Critic,
     actor_optimizer: optax.GradientTransformation,
     critic_optimizer: optax.GradientTransformation,
+    steps_per_epoch: int,
+    val_steps_per_epoch: int,
     horizon: int,
     target_tau: float,
     gamma: float,
@@ -491,7 +492,7 @@ def _build_imagination_step_fns(
         dict[str, jax.Array],
     ],
 ]:
-    """Build jitted train and eval step functions for latent imagination."""
+    """Build jitted train_epoch and eval_epoch functions for latent imagination."""
 
     def loss_fn(
         params: tuple[jtp.PyTree, jtp.PyTree],
@@ -523,14 +524,14 @@ def _build_imagination_step_fns(
 
     @eqx.filter_jit
     @eqx.debug.assert_max_traces(max_traces=1)
-    def train_step(
+    def train_epoch(
         a_params: jtp.PyTree,
         c_params: jtp.PyTree,
         target_c_params: jtp.PyTree,
         a_opt_state: jtp.PyTree,
         c_opt_state: jtp.PyTree,
         wm: LatentFlowWorldModel,
-        step_key: jtp.Key[jtp.Array, ""],
+        epoch_key: jtp.Key[jtp.Array, ""],
         update_actor: jax.Array,
     ) -> tuple[
         jtp.PyTree,
@@ -540,74 +541,90 @@ def _build_imagination_step_fns(
         optax.OptState,
         dict[str, jax.Array],
     ]:
+        def step_fn(
+            carry: tuple[jtp.PyTree, jtp.PyTree, jtp.PyTree, jtp.PyTree, optax.OptState],
+            step_key: jtp.PRNGKeyArray,
+        ) -> tuple[
+            tuple[jtp.PyTree, jtp.PyTree, jtp.PyTree, jtp.PyTree, optax.OptState],
+            dict[str, jax.Array],
+        ]:
+            cur_a_params, cur_c_params, cur_target_c_params, cur_a_opt, cur_c_opt = carry
 
-        sample_key, loss_key = jax.random.split(step_key)
-        exp = train_buffer.sample(train_buffer_state, sample_key).experience
+            sample_key, loss_key = jax.random.split(step_key)
+            exp = train_buffer.sample(train_buffer_state, sample_key).experience
 
-        (_, metrics), (act_grads, crit_grads) = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
-            (a_params, c_params),
-            target_c_params,
-            wm,
-            loss_key,
-            exp["obs"],
-            exp["action"],
-            exp["done"],
+            (_, metrics), (act_grads, crit_grads) = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
+                (cur_a_params, cur_c_params),
+                cur_target_c_params,
+                wm,
+                loss_key,
+                exp["obs"],
+                exp["action"],
+                exp["done"],
+            )
+
+            crit_updates, new_c_opt = critic_optimizer.update(crit_grads, cur_c_opt, params=cur_c_params)
+            new_c_params = eqx.apply_updates(cur_c_params, crit_updates)
+            new_target_c_params = optax.incremental_update(new_c_params, cur_target_c_params, step_size=target_tau)
+
+            def apply_actor_step(
+                operand: tuple[jtp.PyTree, jtp.PyTree, jtp.PyTree],
+            ) -> tuple[jtp.PyTree, jtp.PyTree]:
+                p, opt_s, g = operand
+                updates, new_opt_s = actor_optimizer.update(g, opt_s, params=p)
+                return eqx.apply_updates(p, updates), new_opt_s
+
+            new_a_params, new_a_opt = cast(
+                tuple[jtp.PyTree, jtp.PyTree],
+                jax.lax.cond(
+                    update_actor,
+                    apply_actor_step,
+                    lambda operand: (operand[0], operand[1]),
+                    (cur_a_params, cur_a_opt, act_grads),
+                ),
+            )
+
+            return (new_a_params, new_c_params, new_target_c_params, new_a_opt, new_c_opt), metrics
+
+        step_keys = jax.random.split(epoch_key, steps_per_epoch)
+        (new_a_params, new_c_params, new_target_c_params, new_a_opt, new_c_opt), step_metrics = jax.lax.scan(
+            step_fn,
+            (a_params, c_params, target_c_params, a_opt_state, c_opt_state),
+            step_keys,
         )
 
-        crit_updates, new_crit_opt_state = critic_optimizer.update(crit_grads, c_opt_state, params=c_params)
-        new_crit_params = eqx.apply_updates(c_params, crit_updates)
-        new_target_crit_params = optax.incremental_update(new_crit_params, target_c_params, step_size=target_tau)
-
-        def apply_actor_step(
-            operand: tuple[jtp.PyTree, jtp.PyTree, jtp.PyTree],
-        ) -> tuple[jtp.PyTree, jtp.PyTree]:
-            p, opt_s, g = operand
-            updates, new_opt_s = actor_optimizer.update(g, opt_s, params=p)
-            return eqx.apply_updates(p, updates), new_opt_s
-
-        new_act_params, new_act_opt_state = cast(
-            tuple[jtp.PyTree, jtp.PyTree],
-            jax.lax.cond(
-                update_actor,
-                apply_actor_step,
-                lambda operand: (operand, operand),
-                (a_params, a_opt_state, act_grads),
-            ),
-        )
-
-        return (
-            new_act_params,
-            new_crit_params,
-            new_target_crit_params,
-            new_act_opt_state,
-            new_crit_opt_state,
-            metrics,
-        )
+        epoch_metrics = {k: jnp.mean(v) for k, v in step_metrics.items()}
+        return new_a_params, new_c_params, new_target_c_params, new_a_opt, new_c_opt, epoch_metrics
 
     @eqx.filter_jit
     @eqx.debug.assert_max_traces(max_traces=1)
-    def eval_step(
+    def eval_epoch(
         a_params: jtp.PyTree,
         c_params: jtp.PyTree,
         target_c_params: jtp.PyTree,
         wm: LatentFlowWorldModel,
-        step_key: jtp.Key[jtp.Array, ""],
+        epoch_key: jtp.Key[jtp.Array, ""],
     ) -> dict[str, jax.Array]:
-        sample_key, loss_key = jax.random.split(step_key)
-        exp = val_buffer.sample(val_buffer_state, sample_key).experience
+        def eval_step_fn(step_key: jtp.PRNGKeyArray) -> dict[str, jax.Array]:
+            sample_key, loss_key = jax.random.split(step_key)
+            exp = val_buffer.sample(val_buffer_state, sample_key).experience
 
-        _, metrics = loss_fn(
-            (a_params, c_params),
-            target_c_params,
-            wm,
-            loss_key,
-            exp["obs"],
-            exp["action"],
-            exp["done"],
-        )
-        return metrics
+            _, metrics = loss_fn(
+                (a_params, c_params),
+                target_c_params,
+                wm,
+                loss_key,
+                exp["obs"],
+                exp["action"],
+                exp["done"],
+            )
+            return metrics
 
-    return train_step, eval_step
+        val_keys = jax.random.split(epoch_key, val_steps_per_epoch)
+        step_metrics = jax.lax.map(eval_step_fn, val_keys)
+        return {k: jnp.mean(v) for k, v in step_metrics.items()}
+
+    return train_epoch, eval_epoch
 
 
 @jtp.jaxtyped(typechecker=beartype)
@@ -635,7 +652,7 @@ def imagination_training_loop(
     max_patience: int = 25,
     return_best: bool = True,
     show_progress: bool = True,
-) -> tuple[ActionFlow, Critic, dict[str, list]]:
+) -> tuple[ActionFlow, Critic, dict[str, list[float]]]:
     """Actor-critic latent imagination training loop using Flashbax trajectory buffers."""
     train_buffer, train_buffer_state = train_data
     val_buffer, val_buffer_state = val_data
@@ -658,7 +675,7 @@ def imagination_training_loop(
     act_opt_state = actor_optimizer.init(act_params)
     crit_opt_state = critic_optimizer.init(crit_params)
 
-    train_step, eval_step = _build_imagination_step_fns(
+    train_epoch, eval_epoch = _build_imagination_step_fns(
         train_buffer=train_buffer,
         train_buffer_state=train_buffer_state,
         val_buffer=val_buffer,
@@ -667,6 +684,8 @@ def imagination_training_loop(
         crit_static=crit_static,
         actor_optimizer=actor_optimizer,
         critic_optimizer=critic_optimizer,
+        steps_per_epoch=steps_per_epoch,
+        val_steps_per_epoch=val_steps_per_epoch,
         horizon=horizon,
         target_tau=target_tau,
         gamma=gamma,
@@ -675,7 +694,7 @@ def imagination_training_loop(
         huber_delta=huber_delta,
     )
 
-    history: dict[str, list] = {
+    history: dict[str, list[float]] = {
         "train_actor": [],
         "train_critic": [],
         "train_return": [],
@@ -690,36 +709,30 @@ def imagination_training_loop(
 
     for epoch in loop:
         update_actor = jnp.asarray(epoch >= critic_warmup_epochs)
+        key, train_key, val_key = jax.random.split(key, 3)
 
-        train_metrics_list = []
-        for _ in range(steps_per_epoch):
-            key, step_key = jax.random.split(key)
-            (
-                act_params,
-                crit_params,
-                target_crit_params,
-                act_opt_state,
-                crit_opt_state,
-                step_metrics,
-            ) = train_step(
-                act_params,
-                crit_params,
-                target_crit_params,
-                act_opt_state,
-                crit_opt_state,
-                world_model,
-                step_key,
-                update_actor,
-            )
-            train_metrics_list.append(step_metrics)
+        (
+            act_params,
+            crit_params,
+            target_crit_params,
+            act_opt_state,
+            crit_opt_state,
+            train_metrics,
+        ) = train_epoch(
+            act_params,
+            crit_params,
+            target_crit_params,
+            act_opt_state,
+            crit_opt_state,
+            world_model,
+            train_key,
+            update_actor,
+        )
 
-        val_metrics_list = []
-        for _ in range(val_steps_per_epoch):
-            key, step_key = jax.random.split(key)
-            val_metrics_list.append(eval_step(act_params, crit_params, target_crit_params, world_model, step_key))
+        val_metrics = eval_epoch(act_params, crit_params, target_crit_params, world_model, val_key)
 
-        _aggregate_imagination_metrics(train_metrics_list, "train", history)
-        _aggregate_imagination_metrics(val_metrics_list, "val", history)
+        _aggregate_imagination_metrics(train_metrics, "train", history)
+        _aggregate_imagination_metrics(val_metrics, "val", history)
 
         loop.set_postfix({
             "tr_crit": f"{history['train_critic'][-1]:.3f}",
